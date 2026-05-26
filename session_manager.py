@@ -21,6 +21,59 @@ from datetime import datetime
 EVENT_SYSTEM_FOREGROUND = 0x0003
 WINEVENT_OUTOFCONTEXT   = 0x0000
 
+# Shell window classes that are always permitted so the system tray remains
+# accessible during a session. These are the taskbar containers only —
+# File Explorer (CabinetWClass) is intentionally excluded.
+_TRAY_CLASSES = frozenset({
+    "Shell_TrayWnd",             # main Windows taskbar
+    "Shell_SecondaryTrayWnd",    # taskbar on secondary monitors
+    "NotifyIconOverflowWindow",  # "^" notification overflow popup
+    "TopLevelWindowForOverflowXamlIsland",  # Windows 11 tray overflow host
+})
+
+
+def _is_tray_window(hwnd: int) -> bool:
+    """Return True when hwnd belongs to the taskbar/tray window tree."""
+    if not hwnd:
+        return False
+
+    candidates = [hwnd]
+
+    try:
+        for ancestor in (
+            win32gui.GetAncestor(hwnd, win32con.GA_PARENT),
+            win32gui.GetAncestor(hwnd, win32con.GA_ROOT),
+            win32gui.GetAncestor(hwnd, win32con.GA_ROOTOWNER),
+        ):
+            if ancestor and ancestor not in candidates:
+                candidates.append(ancestor)
+    except Exception:
+        pass
+
+    try:
+        owner = win32gui.GetWindow(hwnd, win32con.GW_OWNER)
+        while owner and owner not in candidates:
+            candidates.append(owner)
+            owner = win32gui.GetWindow(owner, win32con.GW_OWNER)
+    except Exception:
+        pass
+
+    try:
+        parent = win32gui.GetParent(hwnd)
+        while parent and parent not in candidates:
+            candidates.append(parent)
+            parent = win32gui.GetParent(parent)
+    except Exception:
+        pass
+
+    for candidate in candidates:
+        try:
+            if win32gui.GetClassName(candidate) in _TRAY_CLASSES:
+                return True
+        except Exception:
+            continue
+    return False
+
 
 class SessionManager:
     def __init__(self, allowed_procs: set[str], own_pid: int,
@@ -47,9 +100,11 @@ class SessionManager:
 
         self._last_allowed_hwnd: int = 0
         self._hook               = None
-        self._hook_thread: threading.Thread | None = None
-        self._timer_thread: threading.Thread | None = None
+        self._hook_thread:   threading.Thread | None = None
+        self._timer_thread:  threading.Thread | None = None
+        self._poll_thread:   threading.Thread | None = None
         self._lock = threading.Lock()
+        self._refocus_active: bool = False
 
         # WinEvent callback must be kept alive
         WinEventProc = ctypes.WINFUNCTYPE(
@@ -75,14 +130,16 @@ class SessionManager:
 
         # Seed last_allowed_hwnd with the current foreground window if allowed
         hwnd = win32gui.GetForegroundWindow()
-        if self._is_allowed(hwnd):
-            self._last_allowed_hwnd = hwnd
+        self._remember_allowed_window(hwnd)
 
         self._hook_thread = threading.Thread(target=self._hook_loop, daemon=True)
         self._hook_thread.start()
 
         self._timer_thread = threading.Thread(target=self._timer_loop, daemon=True)
         self._timer_thread.start()
+
+        self._poll_thread = threading.Thread(target=self._poll_loop, daemon=True)
+        self._poll_thread.start()
 
     def stop(self):
         self.end_dt  = datetime.now()
@@ -99,12 +156,52 @@ class SessionManager:
     def _is_allowed(self, hwnd: int) -> bool:
         if not hwnd:
             return False
+        # Always allow the taskbar/tray shell windows so the tray icon stays
+        # reachable without permitting all of explorer.exe (File Explorer).
+        if _is_tray_window(hwnd):
+            return True
+        return self._is_allowed_app_window(hwnd)
+
+    def _is_allowed_app_window(self, hwnd: int) -> bool:
+        """Return True for Focus windows or user-selected app windows."""
+        if not hwnd or _is_tray_window(hwnd):
+            return False
         try:
             pid, proc_name = self._proc_for(hwnd)
         except Exception:
             return False
-
         return pid == self.own_pid or proc_name in self.allowed_procs
+
+    def _remember_allowed_window(self, hwnd: int) -> None:
+        """Track only real app windows as refocus targets, never taskbar/tray."""
+        if hwnd == self._overlay_hwnd:
+            return
+        if not win32gui.IsWindowVisible(hwnd):
+            return
+        if not self._is_allowed_app_window(hwnd):
+            return
+        with self._lock:
+            self._last_allowed_hwnd = hwnd
+
+    def _find_allowed_hwnd(self) -> int:
+        """Find a visible allowed app window to use when the tracked target is stale."""
+        found: list[int] = []
+
+        def enum_cb(hwnd, _):
+            if found:
+                return
+            if hwnd == self._overlay_hwnd:
+                return
+            if not win32gui.IsWindowVisible(hwnd):
+                return
+            if self._is_allowed_app_window(hwnd):
+                found.append(hwnd)
+
+        try:
+            win32gui.EnumWindows(enum_cb, None)
+        except Exception:
+            return 0
+        return found[0] if found else 0
 
     def _win_event_cb(self, hWinEventHook, event, hwnd, idObject, idChild, dwEventThread, dwmsEventTime):
         if not self.running:
@@ -114,28 +211,48 @@ class SessionManager:
 
         if self._is_allowed(hwnd):
             # Never make the click-through overlay or any hidden window
-            # (e.g. the phantom tk.Tk() root) a refocus target.
-            if hwnd != self._overlay_hwnd and win32gui.IsWindowVisible(hwnd):
-                with self._lock:
-                    self._last_allowed_hwnd = hwnd
+            # (e.g. the phantom tk.Tk() root) a refocus target. Tray/taskbar
+            # windows are allowed for clicks but must not become the target.
+            self._remember_allowed_window(hwnd)
         else:
-            # Give the OS a moment to finish its transition, then yank focus back
-            threading.Thread(target=self._refocus, daemon=True).start()
+            # Give the OS a moment to finish its transition, then yank focus back.
+            # Use _maybe_refocus to avoid stacking concurrent refocus threads.
+            self._maybe_refocus()
+
+    def _maybe_refocus(self):
+        """Spawn a refocus thread only when one is not already running."""
+        with self._lock:
+            if self._refocus_active:
+                return
+            self._refocus_active = True
+        threading.Thread(target=self._refocus, daemon=True).start()
 
     def _refocus(self):
-        time.sleep(0.05)
-        if not self.running:
-            return
-        with self._lock:
-            target = self._last_allowed_hwnd
-        if not target or not win32gui.IsWindow(target):
-            return
-        if not win32gui.IsWindowVisible(target):
-            # Target became hidden (e.g. Focus window withdrawn to tray).
-            # Clear the stale reference; the next allowed-window focus will refresh it.
+        try:
+            time.sleep(0.05)
+            if not self.running:
+                return
             with self._lock:
-                self._last_allowed_hwnd = 0
-            return
+                target = self._last_allowed_hwnd
+            if (
+                not target
+                or not win32gui.IsWindow(target)
+                or not win32gui.IsWindowVisible(target)
+                or not self._is_allowed_app_window(target)
+            ):
+                # Target became hidden (e.g. Focus window withdrawn to tray).
+                # Fall back to another visible allowed window if one exists.
+                target = self._find_allowed_hwnd()
+                with self._lock:
+                    self._last_allowed_hwnd = target
+                if not target:
+                    return
+            self._do_refocus(target)
+        finally:
+            with self._lock:
+                self._refocus_active = False
+
+    def _do_refocus(self, target: int) -> None:
         try:
             cur_tid    = ctypes.windll.kernel32.GetCurrentThreadId()
             fg_hwnd    = win32gui.GetForegroundWindow()
@@ -154,6 +271,29 @@ class SessionManager:
             ctypes.windll.user32.AttachThreadInput(cur_tid, tgt_tid, False)
         except Exception:
             pass
+
+    def _poll_loop(self):
+        """Backup enforcer: polls the foreground window every 250 ms.
+
+        Newly-launched apps can call SetForegroundWindow during their own
+        initialisation and steal focus back after our WinEvent-triggered
+        refocus has already run. This poll catches those cases that the
+        event hook misses or that occur between hook deliveries.
+        """
+        while self.running:
+            time.sleep(0.25)
+            if not self.running:
+                break
+            try:
+                fg = win32gui.GetForegroundWindow()
+            except Exception:
+                continue
+            if not fg:
+                continue
+            if self._is_allowed(fg):
+                self._remember_allowed_window(fg)
+            else:
+                self._maybe_refocus()
 
     def _hook_loop(self):
         """Run a Windows message loop with the WinEvent hook."""
@@ -202,6 +342,10 @@ class SessionManager:
                 return
             title = win32gui.GetWindowText(hwnd)
             if not title:
+                return
+            # Tray/taskbar windows are always allowed and have no useful title
+            # to display; skip them so they never appear in the selector.
+            if _is_tray_window(hwnd):
                 return
             try:
                 _, pid = win32process.GetWindowThreadProcessId(hwnd)
