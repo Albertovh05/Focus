@@ -22,14 +22,17 @@ EVENT_SYSTEM_FOREGROUND = 0x0003
 WINEVENT_OUTOFCONTEXT   = 0x0000
 
 # Shell window classes that are always permitted so the system tray remains
-# accessible during a session. These are the taskbar containers only —
-# File Explorer (CabinetWClass) is intentionally excluded.
+# accessible during a session. These are the taskbar containers only.
 _TRAY_CLASSES = frozenset({
     "Shell_TrayWnd",             # main Windows taskbar
     "Shell_SecondaryTrayWnd",    # taskbar on secondary monitors
     "NotifyIconOverflowWindow",  # "^" notification overflow popup
     "TopLevelWindowForOverflowXamlIsland",  # Windows 11 tray overflow host
 })
+
+# Windows that are always allowed and hidden from the app selector.
+_ALWAYS_ALLOWED_CLASSES = frozenset({"CabinetWClass"})          # File Explorer
+_ALWAYS_ALLOWED_PROCS   = frozenset({"systemsettings.exe"})     # Windows Settings
 
 
 def _is_tray_window(hwnd: int) -> bool:
@@ -72,6 +75,22 @@ def _is_tray_window(hwnd: int) -> bool:
                 return True
         except Exception:
             continue
+    return False
+
+
+def _is_always_allowed_window(hwnd: int) -> bool:
+    """Return True for File Explorer and Windows Settings windows."""
+    try:
+        if win32gui.GetClassName(hwnd) in _ALWAYS_ALLOWED_CLASSES:
+            return True
+    except Exception:
+        pass
+    try:
+        _, pid = win32process.GetWindowThreadProcessId(hwnd)
+        if psutil.Process(pid).name().lower() in _ALWAYS_ALLOWED_PROCS:
+            return True
+    except Exception:
+        pass
     return False
 
 
@@ -156,9 +175,9 @@ class SessionManager:
     def _is_allowed(self, hwnd: int) -> bool:
         if not hwnd:
             return False
-        # Always allow the taskbar/tray shell windows so the tray icon stays
-        # reachable without permitting all of explorer.exe (File Explorer).
         if _is_tray_window(hwnd):
+            return True
+        if _is_always_allowed_window(hwnd):
             return True
         return self._is_allowed_app_window(hwnd)
 
@@ -343,9 +362,9 @@ class SessionManager:
             title = win32gui.GetWindowText(hwnd)
             if not title:
                 return
-            # Tray/taskbar windows are always allowed and have no useful title
-            # to display; skip them so they never appear in the selector.
-            if _is_tray_window(hwnd):
+            # Tray/taskbar, File Explorer, and Settings are always allowed and
+            # should not appear in the user-facing app selector.
+            if _is_tray_window(hwnd) or _is_always_allowed_window(hwnd):
                 return
             try:
                 _, pid = win32process.GetWindowThreadProcessId(hwnd)

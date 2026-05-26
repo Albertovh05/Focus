@@ -15,16 +15,21 @@ _LWA_ALPHA         = 0x00000002
 
 
 class OverlayWindow:
-    BG         = "#0d1117"
-    FG_TIME    = "#63b3ed"
-    FG_REACHED = "#3fb950"
-    FG_LABEL   = "#8b949e"
-    FG_MODE    = "#f0883e"
-    ALPHA      = 0.85
+    BG         = "#090B14"
+    SURFACE    = "#111827"
+    SURFACE_2  = "#182033"
+    BORDER     = "#334155"
+    FG_TIME    = "#38BDF8"
+    FG_ACCENT  = "#A78BFA"
+    FG_REACHED = "#34D399"
+    FG_LABEL   = "#9CA3AF"
+    FG_MODE    = "#FBBF24"
+    ALPHA      = 0.90
 
     def __init__(self, root: tk.Tk):
         self._click_through = True
         self._goal_seconds  = 0
+        self._elapsed       = 0
         self._drag_x        = 0
         self._drag_y        = 0
 
@@ -36,41 +41,19 @@ class OverlayWindow:
         self.win.configure(bg=self.BG)
         self.win.geometry("+30+30")
 
-        self._frame = tk.Frame(self.win, bg="#1c2230", padx=12, pady=8)
-        self._frame.pack()
+        self._canvas = tk.Canvas(self.win, width=220, height=112, bg=self.BG,
+                                 highlightthickness=0, bd=0)
+        self._canvas.pack()
+        self._time_font = tkfont.Font(family=self._timer_family(), size=28, weight="bold")
+        self._label_font = tkfont.Font(family="Segoe UI", size=8, weight="bold")
+        self._small_font = tkfont.Font(family="Segoe UI", size=8)
 
-        self._label_lbl = tk.Label(
-            self._frame, text="F O C U S", bg="#1c2230", fg=self.FG_LABEL,
-            font=("Segoe UI", 7, "bold"),
-        )
-        self._label_lbl.pack()
-
-        time_font = tkfont.Font(family="Courier New", size=20, weight="bold")
-        self._time_lbl = tk.Label(
-            self._frame, text="00:00:00", bg="#1c2230", fg=self.FG_TIME,
-            font=time_font,
-        )
-        self._time_lbl.pack()
-
-        # Shown only when a goal is active
-        self._goal_lbl = tk.Label(
-            self._frame, text="", bg="#1c2230", fg=self.FG_LABEL,
-            font=("Segoe UI", 8),
-        )
-
-        # Shown only when drag mode is unlocked
-        self._mode_lbl = tk.Label(
-            self._frame, text="drag mode  —  Ctrl+Shift+M to lock",
-            bg="#1c2230", fg=self.FG_MODE,
-            font=("Segoe UI", 7),
-        )
-
-        for widget in (self.win, self._frame, self._label_lbl, self._time_lbl,
-                       self._goal_lbl, self._mode_lbl):
+        for widget in (self.win, self._canvas):
             widget.bind("<ButtonPress-1>", self._drag_start)
             widget.bind("<B1-Motion>",     self._drag_motion)
 
         self.win.withdraw()
+        self._draw()
 
     # ── public ───────────────────────────────────────────────────────────────
 
@@ -85,25 +68,11 @@ class OverlayWindow:
 
     def set_goal(self, minutes: int) -> None:
         self._goal_seconds = minutes * 60
-        if self._goal_seconds:
-            h, m = divmod(minutes, 60)
-            goal_str = f"{h}:{m:02d}:00" if h else f"{m:02d}:00"
-            self._goal_lbl.config(text=f"/ {goal_str}", fg=self.FG_LABEL)
-            self._refresh_extra_labels()
-        else:
-            self._refresh_extra_labels()
+        self._draw()
 
     def update_time(self, elapsed_seconds: int) -> None:
-        h = elapsed_seconds // 3600
-        m = (elapsed_seconds % 3600) // 60
-        s = elapsed_seconds % 60
-        reached = self._goal_seconds and elapsed_seconds >= self._goal_seconds
-        self._time_lbl.config(
-            text=f"{h:02d}:{m:02d}:{s:02d}",
-            fg=self.FG_REACHED if reached else self.FG_TIME,
-        )
-        if reached and self._goal_seconds:
-            self._goal_lbl.config(fg=self.FG_REACHED)
+        self._elapsed = elapsed_seconds
+        self._draw()
 
     def toggle_click_through(self) -> None:
         self._click_through = not self._click_through
@@ -126,16 +95,50 @@ class OverlayWindow:
             )
         except Exception:
             pass
-        self._refresh_extra_labels()
+        self._draw()
 
-    def _refresh_extra_labels(self) -> None:
-        """Repack goal and mode labels in the correct order."""
-        self._goal_lbl.pack_forget()
-        self._mode_lbl.pack_forget()
+    def _timer_family(self) -> str:
+        families = set(tkfont.families())
+        return "Cascadia Code" if "Cascadia Code" in families else "Consolas"
+
+    def _round_rect(self, x1, y1, x2, y2, r, **kwargs):
+        points = [
+            x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r,
+            x2, y2 - r, x2, y2, x2 - r, y2, x1 + r, y2,
+            x1, y2, x1, y2 - r, x1, y1 + r, x1, y1,
+        ]
+        return self._canvas.create_polygon(points, smooth=True, splinesteps=18, **kwargs)
+
+    def _fmt(self, seconds: int) -> str:
+        h = seconds // 3600
+        m = (seconds % 3600) // 60
+        s = seconds % 60
+        return f"{h:02d}:{m:02d}:{s:02d}"
+
+    def _draw(self) -> None:
+        c = self._canvas
+        c.delete("all")
+        w, h = 220, 112
+        reached = bool(self._goal_seconds and self._elapsed >= self._goal_seconds)
+        border = self.FG_REACHED if reached else self.FG_ACCENT
+        time_color = self.FG_REACHED if reached else self.FG_TIME
+
+        self._round_rect(3, 3, w - 3, h - 3, 18, fill=self.SURFACE, outline=border, width=1)
+        self._round_rect(9, 9, w - 9, h - 9, 14, fill=self.SURFACE_2, outline=self.BORDER, width=1)
+        c.create_text(w // 2, 25, text="FOCUS MODE" if not reached else "SESSION COMPLETE",
+                      fill=self.FG_LABEL, font=self._label_font)
+        c.create_text(w // 2, 61, text=self._fmt(self._elapsed),
+                      fill=time_color, font=self._time_font)
+
         if self._goal_seconds:
-            self._goal_lbl.pack()
+            label = self._fmt(self._goal_seconds)
+        else:
+            label = ""
         if not self._click_through:
-            self._mode_lbl.pack()
+            label = "DRAG MODE  Ctrl+Shift+M"
+            time_color = self.FG_MODE
+        c.create_text(w // 2, 96, text=label, fill=self.FG_LABEL if self._click_through else time_color,
+                      font=self._small_font)
 
     # ── drag ─────────────────────────────────────────────────────────────────
 
