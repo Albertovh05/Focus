@@ -79,6 +79,7 @@ class FocusApp:
         self._target_minutes: int = 30
         self._duration_btns: dict[int, ttk.Button] = {}
         self._exiting: bool = False
+        self._goal_reached: bool = False
         self._tray: pystray.Icon | None = None
 
         self._style_ttk()
@@ -348,6 +349,7 @@ class FocusApp:
     def _start_session(self):
         if self._session:
             return
+        self._goal_reached = False
 
         self._allowed_titles = [title for var, title, _ in self._checkboxes if var.get()]
         if not self._allowed_titles:
@@ -390,10 +392,20 @@ class FocusApp:
         self._status_frame.pack(fill="x", padx=20, pady=(16, 0))
 
     def _on_tick(self, elapsed: int):
-        self.root.after(0, self._overlay.update_time, elapsed)
+        self.root.after(0, self._tick_ui, elapsed)
+
+    def _tick_ui(self, elapsed: int):
+        self._overlay.update_time(elapsed)
+        if not self._goal_reached and elapsed >= self._target_minutes * 60:
+            self._goal_reached = True
+            self._do_show()
+            self._show_goal_reached_dialog()
 
     def _request_stop(self):
-        self._show_motivational_dialog()
+        if self._goal_reached:
+            self._stop_session()
+        else:
+            self._show_motivational_dialog()
 
     def _stop_session(self):
         if not self._session:
@@ -510,6 +522,59 @@ class FocusApp:
         dlg.bind("<Escape>", lambda e: stay())
         tick(5)
 
+    # ── Goal-reached dialog ───────────────────────────────────────────────────
+
+    def _show_goal_reached_dialog(self):
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Session Complete!")
+        dlg.configure(bg=C_BG)
+        dlg.resizable(False, False)
+        dlg.attributes("-topmost", True)
+        dlg.grab_set()
+
+        w, h = 480, 220
+        dlg.geometry(f"{w}x{h}+{(dlg.winfo_screenwidth()-w)//2}+{(dlg.winfo_screenheight()-h)//2}")
+
+        def cleanup():
+            dlg.grab_release()
+            dlg.destroy()
+            self.root.lift()
+            self.root.focus_force()
+
+        def keep_going():
+            cleanup()
+
+        def end_session():
+            cleanup()
+            self._stop_session()
+
+        dlg.protocol("WM_DELETE_WINDOW", keep_going)
+
+        tk.Label(
+            dlg,
+            text=f"You hit your {self._target_minutes}-minute goal — great work!",
+            bg=C_BG, fg=C_SUCCESS,
+            font=("Segoe UI", 13, "bold"),
+            pady=28,
+        ).pack()
+
+        tk.Label(
+            dlg,
+            text="Keep going as long as you like, or wrap it up.",
+            bg=C_BG, fg=C_MUTED,
+            font=("Segoe UI", 10),
+        ).pack()
+
+        btn_row = ttk.Frame(dlg)
+        btn_row.pack(pady=(20, 24))
+
+        ttk.Button(btn_row, text="  Keep Going  ", command=keep_going,
+                   style="Accent.TButton").pack(side="left", padx=8)
+        ttk.Button(btn_row, text="  End Session  ", command=end_session,
+                   style="Danger.TButton").pack(side="left", padx=8)
+
+        dlg.bind("<Escape>", lambda e: keep_going())
+
     # ── Hotkeys ──────────────────────────────────────────────────────────────
 
     def _register_hotkey(self):
@@ -518,7 +583,10 @@ class FocusApp:
 
     def _hotkey_end_session(self):
         if self._session:
-            self.root.after(0, self._show_motivational_dialog)
+            if self._goal_reached:
+                self.root.after(0, self._stop_session)
+            else:
+                self.root.after(0, self._show_motivational_dialog)
 
     def _hotkey_move_overlay(self):
         if self._session:
@@ -556,7 +624,10 @@ class FocusApp:
 
     def _request_tray_exit(self):
         self._do_show()
-        self._show_motivational_dialog(on_exit=self._do_quit)
+        if self._goal_reached:
+            self._do_quit()
+        else:
+            self._show_motivational_dialog(on_exit=self._do_quit)
 
     def _do_quit(self):
         if self._session:
