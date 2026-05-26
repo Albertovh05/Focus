@@ -15,9 +15,11 @@ import keyboard
 from PIL import Image
 import pystray
 
-from db import save_session, get_sessions, fmt_duration
+from db import (save_session, get_sessions, fmt_duration,
+                get_blocked_domains, add_blocked_domain, remove_blocked_domain)
 from session_manager import SessionManager
 from overlay import OverlayWindow
+from site_blocker import SiteBlocker, _is_admin
 
 # ── Colour tokens ─────────────────────────────────────────────────────────────
 C_BG      = "#0d1117"
@@ -81,6 +83,7 @@ class FocusApp:
         self._exiting: bool = False
         self._goal_reached: bool = False
         self._tray: pystray.Icon | None = None
+        self._site_blocker: SiteBlocker | None = None
 
         self._style_ttk()
         self._build_ui()
@@ -257,6 +260,8 @@ class FocusApp:
 
         ttk.Label(btn_row, text="or  Ctrl+Shift+J", style="Muted.TLabel").pack(side="left", padx=(12, 0))
 
+        self._build_blocklist_section(f)
+
         self._checkboxes: list[tuple[tk.BooleanVar, str, str]] = []
         self._refresh_windows()
 
@@ -292,6 +297,65 @@ class FocusApp:
         self._target_minutes = minutes
         for m, btn in self._duration_btns.items():
             btn.config(style="ChipOn.TButton" if m == minutes else "Chip.TButton")
+
+    # ── Blocklist section ─────────────────────────────────────────────────────
+
+    def _build_blocklist_section(self, parent: ttk.Frame) -> None:
+        outer = ttk.Frame(parent, style="Surface.TFrame")
+        outer.pack(fill="x", padx=20, pady=(0, 12))
+
+        header_row = ttk.Frame(outer, style="Surface.TFrame")
+        header_row.pack(fill="x", padx=12, pady=(8, 4))
+        ttk.Label(header_row, text="Block these websites",
+                  style="Header.TLabel", background=C_SURFACE).pack(side="left")
+        if not _is_admin():
+            ttk.Label(header_row,
+                      text="(run as Admin to also block in Firefox)",
+                      style="Muted.TLabel", background=C_SURFACE).pack(side="left", padx=(8, 0))
+
+        input_row = ttk.Frame(outer, style="Surface.TFrame")
+        input_row.pack(fill="x", padx=12, pady=(0, 6))
+
+        self._domain_entry = ttk.Entry(input_row, width=28,
+                                       font=("Segoe UI", 10))
+        self._domain_entry.pack(side="left")
+        self._domain_entry.bind("<Return>", lambda e: self._add_blocked_domain())
+
+        ttk.Button(input_row, text="+ Add",
+                   command=self._add_blocked_domain,
+                   style="Accent.TButton").pack(side="left", padx=(6, 0))
+
+        self._blocklist_frame = ttk.Frame(outer, style="Surface.TFrame")
+        self._blocklist_frame.pack(fill="x", padx=12, pady=(0, 8))
+
+        self._refresh_blocklist()
+
+    def _refresh_blocklist(self) -> None:
+        for w in self._blocklist_frame.winfo_children():
+            w.destroy()
+        for domain in get_blocked_domains():
+            row = ttk.Frame(self._blocklist_frame, style="Surface.TFrame")
+            row.pack(fill="x", pady=1)
+            ttk.Label(row, text=domain, style="TLabel",
+                      background=C_SURFACE).pack(side="left", padx=(0, 8))
+            ttk.Button(row, text="×",
+                       command=lambda d=domain: self._remove_blocked_domain(d),
+                       style="Danger.TButton").pack(side="right")
+
+    def _add_blocked_domain(self) -> None:
+        raw = self._domain_entry.get().strip()
+        if not raw:
+            return
+        domain = SiteBlocker._normalise(raw)
+        if not domain:
+            return
+        add_blocked_domain(domain)
+        self._domain_entry.delete(0, tk.END)
+        self._refresh_blocklist()
+
+    def _remove_blocked_domain(self, domain: str) -> None:
+        remove_blocked_domain(domain)
+        self._refresh_blocklist()
 
     # ── History tab ───────────────────────────────────────────────────────────
 
@@ -376,6 +440,11 @@ class FocusApp:
         )
         self._session.start()
 
+        blocked = get_blocked_domains()
+        if blocked:
+            self._site_blocker = SiteBlocker(blocked)
+            self._site_blocker.start()
+
         self._overlay.set_goal(self._target_minutes)
         self._overlay.show()
         self._overlay.update_time(0)
@@ -386,6 +455,13 @@ class FocusApp:
         for btn in self._duration_btns.values():
             btn.config(state="disabled")
         for row in self._win_list_frame.winfo_children():
+            for widget in row.winfo_children():
+                try:
+                    widget.config(state="disabled")
+                except Exception:
+                    pass
+        self._domain_entry.config(state="disabled")
+        for row in self._blocklist_frame.winfo_children():
             for widget in row.winfo_children():
                 try:
                     widget.config(state="disabled")
@@ -437,6 +513,13 @@ class FocusApp:
                     pass
 
         self._status_frame.pack_forget()
+
+        if self._site_blocker:
+            self._site_blocker.stop()
+            self._site_blocker = None
+        self._domain_entry.config(state="normal")
+        self._refresh_blocklist()
+
         self._refresh_windows()
 
     # ── Motivational exit dialog ──────────────────────────────────────────────

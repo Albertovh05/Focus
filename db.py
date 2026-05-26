@@ -23,6 +23,12 @@ def init_db():
                 allowed_windows TEXT NOT NULL
             )
         """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS blocked_domains (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                domain TEXT NOT NULL UNIQUE
+            )
+        """)
         c.commit()
 
 
@@ -52,6 +58,25 @@ def get_sessions() -> list[dict]:
         d["allowed_windows"] = json.loads(d["allowed_windows"])
         result.append(d)
     return result
+
+
+def get_blocked_domains() -> list[str]:
+    init_db()
+    with _conn() as c:
+        rows = c.execute("SELECT domain FROM blocked_domains ORDER BY domain").fetchall()
+    return [row["domain"] for row in rows]
+
+
+def add_blocked_domain(domain: str) -> None:
+    with _conn() as c:
+        c.execute("INSERT OR IGNORE INTO blocked_domains (domain) VALUES (?)", (domain,))
+        c.commit()
+
+
+def remove_blocked_domain(domain: str) -> None:
+    with _conn() as c:
+        c.execute("DELETE FROM blocked_domains WHERE domain = ?", (domain,))
+        c.commit()
 
 
 def fmt_duration(seconds: int) -> str:
