@@ -265,19 +265,26 @@ class FocusApp:
             w.destroy()
         self._checkboxes.clear()
 
+        own_pid = os.getpid()
         for win in SessionManager.get_open_windows():
-            var     = tk.BooleanVar(value=False)
+            is_own  = win["pid"] == own_pid
+            var     = tk.BooleanVar(value=is_own)
             title   = win["title"]
             process = win["process"]
             row     = ttk.Frame(self._win_list_frame, style="Surface.TFrame")
             row.pack(fill="x", padx=4, pady=1)
 
-            ttk.Checkbutton(row, variable=var, style="TCheckbutton").pack(
-                side="left", padx=(8, 4), pady=6)
+            cb = ttk.Checkbutton(row, variable=var, style="TCheckbutton")
+            cb.pack(side="left", padx=(8, 4), pady=6)
+            if is_own:
+                cb.config(state="disabled")
             ttk.Label(row, text=title, style="TLabel",
                       background=C_SURFACE, wraplength=500, justify="left").pack(side="left")
             ttk.Label(row, text=f"({process})", style="Muted.TLabel",
                       background=C_SURFACE).pack(side="left", padx=(4, 8))
+            if is_own:
+                ttk.Label(row, text="always allowed", style="Muted.TLabel",
+                          background=C_SURFACE).pack(side="left", padx=(0, 8))
 
             self._checkboxes.append((var, title, process))
 
@@ -398,8 +405,6 @@ class FocusApp:
         self._overlay.update_time(elapsed)
         if not self._goal_reached and elapsed >= self._target_minutes * 60:
             self._goal_reached = True
-            self._do_show()
-            self._show_goal_reached_dialog()
 
     def _request_stop(self):
         if self._goal_reached:
@@ -521,59 +526,6 @@ class FocusApp:
 
         dlg.bind("<Escape>", lambda e: stay())
         tick(5)
-
-    # ── Goal-reached dialog ───────────────────────────────────────────────────
-
-    def _show_goal_reached_dialog(self):
-        dlg = tk.Toplevel(self.root)
-        dlg.title("Session Complete!")
-        dlg.configure(bg=C_BG)
-        dlg.resizable(False, False)
-        dlg.attributes("-topmost", True)
-        dlg.grab_set()
-
-        w, h = 480, 220
-        dlg.geometry(f"{w}x{h}+{(dlg.winfo_screenwidth()-w)//2}+{(dlg.winfo_screenheight()-h)//2}")
-
-        def cleanup():
-            dlg.grab_release()
-            dlg.destroy()
-            self.root.lift()
-            self.root.focus_force()
-
-        def keep_going():
-            cleanup()
-
-        def end_session():
-            cleanup()
-            self._stop_session()
-
-        dlg.protocol("WM_DELETE_WINDOW", keep_going)
-
-        tk.Label(
-            dlg,
-            text=f"You hit your {self._target_minutes}-minute goal — great work!",
-            bg=C_BG, fg=C_SUCCESS,
-            font=("Segoe UI", 13, "bold"),
-            pady=28,
-        ).pack()
-
-        tk.Label(
-            dlg,
-            text="Keep going as long as you like, or wrap it up.",
-            bg=C_BG, fg=C_MUTED,
-            font=("Segoe UI", 10),
-        ).pack()
-
-        btn_row = ttk.Frame(dlg)
-        btn_row.pack(pady=(20, 24))
-
-        ttk.Button(btn_row, text="  Keep Going  ", command=keep_going,
-                   style="Accent.TButton").pack(side="left", padx=8)
-        ttk.Button(btn_row, text="  End Session  ", command=end_session,
-                   style="Danger.TButton").pack(side="left", padx=8)
-
-        dlg.bind("<Escape>", lambda e: keep_going())
 
     # ── Hotkeys ──────────────────────────────────────────────────────────────
 

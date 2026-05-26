@@ -6,11 +6,12 @@ A Windows productivity app that locks you into a set of allowed windows during a
 
 ## What it does
 
-1. User opens the app from the system tray, selects which open windows are allowed, and picks a session duration (10–60 min).
+1. User opens the app from the system tray, selects which open windows are allowed, and picks a session duration via preset chips: 10, 15, 20, 25, 30, 45, or 60 min.
 2. Hitting "Start Session" activates the enforcer — any window not in the allowed list is immediately defocused.
-3. An always-on-top timer overlay shows elapsed time vs. the goal.
-4. Stopping the session requires clicking "End Session" (or `Ctrl+Shift+J`) and reading through up to 3 motivational messages before confirming — deliberate friction to prevent impulsive quitting.
-5. Sessions are saved to a local SQLite database; the History tab shows all past sessions with a running total.
+3. An always-on-top timer overlay shows elapsed time vs. the goal; the timer turns green when the goal is reached.
+4. When the goal time is hit, a "Session Complete!" dialog pops up automatically — the user can choose to keep going or end the session cleanly (no friction at this point).
+5. Stopping the session *before* the goal requires clicking "End Session" (or `Ctrl+Shift+J`) and reading through 3 motivational messages, each with a 5-second countdown before advancing — deliberate friction to prevent impulsive quitting.
+6. Sessions are saved to a local SQLite database; the History tab shows all past sessions (date, start/end times, duration, allowed windows) with a running total.
 
 ---
 
@@ -21,7 +22,7 @@ main.py            — App entry point, tkinter UI (Session tab + History tab)
 session_manager.py — Window enforcement via WinEvent hook + timer thread
 overlay.py         — Always-on-top draggable timer widget (click-through by default)
 db.py              — SQLite persistence (focus_history.db, written next to the exe)
-icon_gen.py        — Generates focus_icon.ico at build time using Pillow
+icon_gen.py        — Generates focus_icon.ico at startup (or build time) if missing
 ```
 
 ### Threading model
@@ -60,7 +61,7 @@ self._overlay.win = tk.Toplevel(self.root)  # timer overlay
 | `session_manager.py` | Enforcement logic, WinEvent hook |
 | `overlay.py` | Timer overlay widget |
 | `db.py` | SQLite read/write |
-| `icon_gen.py` | ICO generation (run once at build time) |
+| `icon_gen.py` | ICO generation — called at startup if `focus_icon.ico` is missing |
 | `focus_icon.ico` | App icon (clock face, dark theme) |
 | `focus_history.db` | Created at runtime next to the exe |
 | `requirements.txt` | Python dependencies |
@@ -103,8 +104,11 @@ Before rebuilding, kill any running `Focus.exe` first — PyInstaller cannot ove
 | Right-click tray icon | Menu: "Open Focus" / "Exit" |
 | Close (X) the main window | Hides back to tray; active session keeps running |
 | Tray → Exit (no session) | Quits immediately |
-| Tray → Exit (session active) | Opens main window, shows motivational dialog |
-| `Ctrl+Shift+J` | Triggers end-session motivational dialog |
+| Tray → Exit (session active, goal not reached) | Opens main window, shows motivational dialog |
+| Tray → Exit (session active, goal reached) | Ends session and quits immediately — no motivational dialog |
+| Goal time reached | "Session Complete!" dialog auto-opens; choose "Keep Going" or "End Session" |
+| `Ctrl+Shift+J` (goal not yet reached) | Triggers motivational exit dialog |
+| `Ctrl+Shift+J` (goal already reached) | Ends session immediately |
 | `Ctrl+Shift+M` | Toggles overlay between click-through and draggable |
 
 ---
@@ -131,6 +135,7 @@ C_ACCENT  = "#63b3ed"   # blue (primary accent)
 C_ACCENT2 = "#388bfd"   # brighter blue (buttons, selection)
 C_SUCCESS = "#3fb950"   # green
 C_DANGER  = "#f85149"   # red
+C_HEADER  = "#1c2230"   # dark blue-grey (treeview headings, overlay frame)
 ```
 
 The dark theme is GitHub-inspired and intentionally non-configurable — the app has one look.
