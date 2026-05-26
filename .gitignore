@@ -5,3 +5,6 @@ dist/
 *.spec.bak
 focus_history.db
 =0.19.0
+
+# Agent-only reference doc — not part of the public repo
+handout.md

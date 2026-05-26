@@ -131,13 +131,19 @@ class FocusApp:
         style.configure("TScrollbar", background=C_SURFACE, troughcolor=C_BG,
                         bordercolor=C_BG, arrowcolor=C_MUTED)
 
+        style.configure("TEntry",
+                        fieldbackground=C_SURFACE, foreground=C_TEXT,
+                        insertcolor=C_TEXT, selectbackground=C_ACCENT2,
+                        selectforeground="#ffffff", bordercolor=C_BORDER,
+                        lightcolor=C_BORDER, darkcolor=C_BORDER)
+
         style.configure("Accent.TButton",
                         background=C_ACCENT2, foreground="#ffffff",
                         font=("Segoe UI", 10, "bold"), padding=[16, 8],
                         borderwidth=0, relief="flat")
         style.map("Accent.TButton",
                   background=[("active", "#58a6ff"), ("disabled", C_BORDER)],
-                  foreground=[("disabled", C_MUTED)])
+                  foreground=[("active", "#ffffff"), ("!disabled", "#ffffff"), ("disabled", C_MUTED)])
 
         style.configure("Danger.TButton",
                         background=C_DANGER, foreground="#ffffff",
@@ -224,9 +230,9 @@ class FocusApp:
 
         # Window list
         list_outer = ttk.Frame(f, style="Surface.TFrame")
-        list_outer.pack(fill="both", expand=True, padx=20, pady=(0, 12))
+        list_outer.pack(fill="x", expand=False, padx=20, pady=(0, 12))
 
-        canvas = tk.Canvas(list_outer, bg=C_SURFACE, highlightthickness=0)
+        canvas = tk.Canvas(list_outer, bg=C_SURFACE, highlightthickness=0, height=180)
         scrollbar = ttk.Scrollbar(list_outer, orient="vertical", command=canvas.yview)
         self._win_list_frame = ttk.Frame(canvas, style="Surface.TFrame")
 
@@ -321,26 +327,59 @@ class FocusApp:
         self._domain_entry.pack(side="left")
         self._domain_entry.bind("<Return>", lambda e: self._add_blocked_domain())
 
-        ttk.Button(input_row, text="+ Add",
-                   command=self._add_blocked_domain,
-                   style="Accent.TButton").pack(side="left", padx=(6, 0))
+        self._add_btn = tk.Button(input_row, text="+ Add",
+                                  command=self._add_blocked_domain,
+                                  bg=C_ACCENT2, fg="#ffffff",
+                                  activebackground="#58a6ff", activeforeground="#ffffff",
+                                  disabledforeground=C_MUTED,
+                                  font=("Segoe UI", 10, "bold"),
+                                  relief="flat", bd=0, padx=10, pady=4,
+                                  cursor="hand2")
+        self._add_btn.pack(side="left", padx=(6, 0))
 
-        self._blocklist_frame = ttk.Frame(outer, style="Surface.TFrame")
-        self._blocklist_frame.pack(fill="x", padx=12, pady=(0, 8))
+        bl_outer = tk.Frame(outer, bg=C_SURFACE)
+        bl_outer.pack(fill="x", padx=12, pady=(0, 8))
+
+        self._bl_canvas = tk.Canvas(bl_outer, bg=C_SURFACE, highlightthickness=0, height=88)
+        bl_sb = ttk.Scrollbar(bl_outer, orient="vertical", command=self._bl_canvas.yview)
+        self._blocklist_frame = tk.Frame(self._bl_canvas, bg=C_SURFACE)
+
+        self._blocklist_frame.bind(
+            "<Configure>",
+            lambda e: self._bl_canvas.configure(scrollregion=self._bl_canvas.bbox("all")),
+        )
+        self._bl_canvas.create_window((0, 0), window=self._blocklist_frame, anchor="nw")
+        self._bl_canvas.configure(yscrollcommand=bl_sb.set)
+        self._bl_canvas.bind(
+            "<MouseWheel>",
+            lambda e: self._bl_canvas.yview_scroll(-1 * (e.delta // 120), "units"),
+        )
+        bl_sb.pack(side="right", fill="y")
+        self._bl_canvas.pack(side="left", fill="both", expand=True)
 
         self._refresh_blocklist()
 
     def _refresh_blocklist(self) -> None:
         for w in self._blocklist_frame.winfo_children():
             w.destroy()
-        for domain in get_blocked_domains():
-            row = ttk.Frame(self._blocklist_frame, style="Surface.TFrame")
-            row.pack(fill="x", pady=1)
-            ttk.Label(row, text=domain, style="TLabel",
-                      background=C_SURFACE).pack(side="left", padx=(0, 8))
-            ttk.Button(row, text="×",
-                       command=lambda d=domain: self._remove_blocked_domain(d),
-                       style="Danger.TButton").pack(side="right")
+        domains = get_blocked_domains()
+        if not domains:
+            tk.Label(self._blocklist_frame, text="No websites blocked",
+                     bg=C_SURFACE, fg=C_MUTED,
+                     font=("Segoe UI", 9)).pack(anchor="w", pady=4)
+            return
+        for domain in domains:
+            row = tk.Frame(self._blocklist_frame, bg=C_SURFACE)
+            row.pack(fill="x", pady=2)
+            tk.Label(row, text=domain, bg=C_SURFACE, fg=C_TEXT,
+                     font=("Segoe UI", 10)).pack(side="left", padx=(0, 8), pady=4)
+            tk.Button(row, text="🗑",
+                      command=lambda d=domain: self._remove_blocked_domain(d),
+                      bg=C_SURFACE, fg=C_DANGER,
+                      activebackground=C_BORDER, activeforeground=C_DANGER,
+                      font=("Segoe UI Emoji", 12),
+                      relief="flat", bd=0, padx=4, pady=2,
+                      cursor="hand2").pack(side="right")
 
     def _add_blocked_domain(self) -> None:
         raw = self._domain_entry.get().strip()
@@ -461,6 +500,7 @@ class FocusApp:
                 except Exception:
                     pass
         self._domain_entry.config(state="disabled")
+        self._add_btn.config(state="disabled")
         for row in self._blocklist_frame.winfo_children():
             for widget in row.winfo_children():
                 try:
@@ -473,6 +513,11 @@ class FocusApp:
                  f"  ·  goal: {self._target_minutes} min  ·  Ctrl+Shift+J to end"
         )
         self._status_frame.pack(fill="x", padx=20, pady=(16, 0))
+
+        # Bring Focus window to the front so the user starts on an allowed window.
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
 
     def _on_tick(self, elapsed: int):
         self.root.after(0, self._tick_ui, elapsed)
@@ -518,6 +563,7 @@ class FocusApp:
             self._site_blocker.stop()
             self._site_blocker = None
         self._domain_entry.config(state="normal")
+        self._add_btn.config(state="normal")
         self._refresh_blocklist()
 
         self._refresh_windows()
