@@ -7,11 +7,13 @@ A Windows productivity app that locks you into a set of allowed windows during a
 ## What it does
 
 1. User opens the app from the system tray, selects which open windows are allowed, and picks a session duration via preset chips: 10, 15, 20, 25, 30, 45, or 60 min.
-2. Hitting "Start Session" activates the enforcer — any window not in the allowed list is immediately defocused.
-3. An always-on-top timer overlay shows elapsed time vs. the goal; the timer turns green when the goal is reached.
-4. When the goal time is hit, a "Session Complete!" dialog pops up automatically — the user can choose to keep going or end the session cleanly (no friction at this point).
-5. Stopping the session *before* the goal requires clicking "End Session" (or `Ctrl+Shift+J`) and reading through 3 motivational messages, each with a 5-second countdown before advancing — deliberate friction to prevent impulsive quitting.
-6. Sessions are saved to a local SQLite database; the History tab shows all past sessions (date, start/end times, duration, allowed windows) with a running total.
+2. The Focus app's own window is always pre-checked and cannot be deselected.
+3. Optionally, the user adds blocked websites (e.g. `youtube.com`) in the "Block these websites" section — the list persists across restarts.
+4. Hitting "Start Session" activates the enforcer — any window not in the allowed list is immediately defocused. Blocked websites become unreachable in all browsers (via hosts file) and Chromium tabs navigate there are closed automatically.
+5. An always-on-top timer overlay shows elapsed time vs. the goal; the timer turns green when the goal is reached. No dialog fires — the session continues silently so the user stays in flow.
+6. Stopping the session *before* the goal requires clicking "End Session" (or `Ctrl+Shift+J`) and reading through 3 motivational messages, each with a 5-second countdown before advancing — deliberate friction to prevent impulsive quitting.
+7. Once the goal is reached, ending the session (button, hotkey, or tray exit) skips the motivational friction entirely.
+8. Sessions are saved to a local SQLite database; the History tab shows all past sessions (date, start/end times, duration, allowed windows) with a running total.
 
 ---
 
@@ -20,6 +22,7 @@ A Windows productivity app that locks you into a set of allowed windows during a
 ```
 main.py            — App entry point, tkinter UI (Session tab + History tab)
 session_manager.py — Window enforcement via WinEvent hook + timer thread
+site_blocker.py    — Website blocklist: hosts-file blocking + Chromium tab watcher
 overlay.py         — Always-on-top draggable timer widget (click-through by default)
 db.py              — SQLite persistence (focus_history.db, written next to the exe)
 icon_gen.py        — Generates focus_icon.ico at startup (or build time) if missing
@@ -30,8 +33,9 @@ icon_gen.py        — Generates focus_icon.ico at startup (or build time) if mi
 | Thread | What it does |
 |--------|-------------|
 | Main (tkinter) | UI event loop, driven by `self._phantom.mainloop()` |
-| `_hook_thread` | Windows message loop that receives `EVENT_SYSTEM_FOREGROUND` WinEvent callbacks |
+| `_hook_thread` (SessionManager) | Windows message loop that receives `EVENT_SYSTEM_FOREGROUND` WinEvent callbacks |
 | `_timer_thread` | 1-second tick loop; calls `on_tick(elapsed)` which posts to the UI via `root.after()` |
+| `_hook_thread` (SiteBlocker) | Windows message loop that receives `EVENT_OBJECT_NAMECHANGE` callbacks; only runs when a session with blocked domains is active |
 | pystray thread | Daemon thread running the system tray icon message loop |
 
 ### Taskbar hiding — phantom root pattern
@@ -58,16 +62,17 @@ self._overlay.win = tk.Toplevel(self.root)  # timer overlay
 | File | Purpose |
 |------|---------|
 | `main.py` | UI, tray icon, session wiring |
-| `session_manager.py` | Enforcement logic, WinEvent hook |
+| `session_manager.py` | Window enforcement logic, WinEvent hook |
+| `site_blocker.py` | Website blocklist: hosts-file writes + Chromium title watcher |
 | `overlay.py` | Timer overlay widget |
-| `db.py` | SQLite read/write |
+| `db.py` | SQLite read/write (sessions + blocked domains) |
 | `icon_gen.py` | ICO generation — called at startup if `focus_icon.ico` is missing |
 | `focus_icon.ico` | App icon (clock face, dark theme) |
 | `focus_history.db` | Created at runtime next to the exe |
 | `requirements.txt` | Python dependencies |
 | `build.bat` | Build script (calls PyInstaller) |
 | `Focus.spec` | PyInstaller spec for reproducible builds |
-| `dist/Focus.exe` | Distributable single-file exe (~168 MB) |
+| `dist/Focus.exe` | Distributable single-file exe; requests admin via embedded UAC manifest |
 
 ---
 
@@ -116,10 +121,14 @@ Before rebuilding, kill any running `Focus.exe` first — PyInstaller cannot ove
 ## Key design decisions
 
 - **Process-level allow list, not window-level** — every window of an allowed app (e.g. every Chrome tab) is permitted. This avoids the need to re-allow windows when tabs change.
-- **Motivational friction on exit** — the user must read 3 messages before ending a session early, each with a 5-second countdown before the "next" button unlocks. This is intentional, not a bug.
-- **Session continues when window is hidden** — closing the main window only hides the UI; the enforcer and overlay keep running until the session is explicitly ended.
-- **SQLite next to the exe** — `focus_history.db` is written to the same directory as the running script/exe so data persists between version updates without any config.
+- **Focus app window always allowed** — the Focus app's own window is pre-checked and locked in the selector so the user can always reach the UI and end the session.
+- **Motivational friction on early exit only** — the 3-message countdown is shown only when the user tries to quit *before* reaching the goal. Once the goal is met, quitting is immediate and frictionless.
+- **Silent goal completion** — when elapsed time hits the target, `_goal_reached` is set to `True` and the overlay turns green; no dialog fires. The session continues silently to keep the user in flow.
+- **Session continues when window is hidden** — closing the main window only hides the UI; the enforcer, overlay, and site blocker keep running until the session is explicitly ended.
+- **SQLite next to the exe** — `focus_history.db` is written to the same directory as the running script/exe so data persists between version updates without any config. The blocked-domains list is stored in the same file.
 - **`AttachThreadInput` for reliable refocus** — plain `SetForegroundWindow` is blocked by Windows unless the calling thread owns foreground rights; borrowing them from the current foreground thread via `AttachThreadInput` is what makes enforcement reliable.
+- **Two-layer website blocking** — the hosts file (`127.0.0.1` entries) blocks at DNS level for every browser; a separate `EVENT_OBJECT_NAMECHANGE` WinEvent hook watches Chromium window titles and sends `Ctrl+W` to close the tab when a blocked domain is detected, giving a clean "tab closes" UX. The hosts layer is the authoritative block; the tab-close is a UX nicety layered on top.
+- **UAC manifest in the exe** — `Focus.exe` embeds a `requireAdministrator` manifest so Windows prompts for elevation on launch. This is needed for the hosts-file write; without it the site blocker degrades gracefully to Chromium-only tab closing.
 
 ---
 
