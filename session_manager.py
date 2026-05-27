@@ -31,8 +31,14 @@ _TRAY_CLASSES = frozenset({
 })
 
 # Windows that are always allowed and hidden from the app selector.
-_ALWAYS_ALLOWED_CLASSES = frozenset({"CabinetWClass"})          # File Explorer
-_ALWAYS_ALLOWED_PROCS   = frozenset({"systemsettings.exe"})     # Windows Settings
+_ALWAYS_ALLOWED_CLASSES = frozenset({
+    "CabinetWClass",        # File Explorer
+    "ControlCenterWindow",  # Quick Settings panel (WiFi, Bluetooth, battery saver)
+})
+_ALWAYS_ALLOWED_PROCS   = frozenset({
+    "systemsettings.exe",       # Windows Settings app
+    "shellexperiencehost.exe",  # Windows shell experience host
+})
 
 
 def _is_tray_window(hwnd: int) -> bool:
