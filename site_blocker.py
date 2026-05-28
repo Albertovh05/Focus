@@ -83,16 +83,25 @@ def _domain_in_title(title: str, domains: list[str]) -> bool:
     """
     Return True when the window title suggests a blocked domain is active.
 
-    Maps each domain to its second-level label (e.g. "youtube.com" → "youtube")
-    and checks whether that label appears anywhere in the title (case-insensitive).
-    Short labels (≤2 chars, like "x" or "fb") are skipped to avoid false positives;
-    the hosts-file layer still blocks those domains.
+    Only matches the second-level domain name at the very start or end of the
+    title — the positions where a site names itself ("YouTube – Video" or
+    "Video – YouTube"). A match in the middle means the page content merely
+    mentions the brand and should not trigger a close.
+    Short labels (≤2 chars, like "x" or "fb") are skipped; the hosts-file
+    layer still blocks those domains.
     """
-    title_lower = title.lower()
+    # Strip leading notification count like "(3) " or "[3] "
+    normalized = re.sub(r'^\s*[\(\[]\d+[\)\]]\s*', '', title.lower().strip())
+    _SEP = r'\s*[\-\|·/—–:]+\s*'
     for domain in domains:
         parts = domain.split(".")
         sld = parts[-2] if len(parts) >= 2 else domain
-        if len(sld) > 2 and sld in title_lower:
+        if len(sld) <= 2:
+            continue
+        escaped = re.escape(sld)
+        at_start = bool(re.match(r'^' + escaped + r'(?:' + _SEP + r'|$)', normalized))
+        at_end   = bool(re.search(r'(?:^|' + _SEP + r')' + escaped + r'\s*$', normalized))
+        if at_start or at_end:
             return True
     return False
 
@@ -119,6 +128,8 @@ class SiteBlocker:
         self._hook           = None
         self._hook_tid: int  = 0
         self._hook_thread: threading.Thread | None = None
+        self._last_close_time: float = 0.0
+        self._close_lock = threading.Lock()
 
         WinEventProc = ctypes.WINFUNCTYPE(
             None,
@@ -192,8 +203,16 @@ class SiteBlocker:
             current_title = win32gui.GetWindowText(hwnd)
             if not _domain_in_title(current_title, self._domains):
                 return
-            # Only send Ctrl+W if a Chromium window is still in the foreground
+            # Only send Ctrl+W if a Chromium window is still in the foreground.
+            # Rate-limit to one close per second to prevent cascade: closing a tab
+            # triggers a title change which would otherwise immediately close the
+            # next tab too, always deleting two tabs instead of one.
             if _is_chromium_foreground():
+                with self._close_lock:
+                    now = time.monotonic()
+                    if now - self._last_close_time < 1.0:
+                        return
+                    self._last_close_time = now
                 keyboard.send("ctrl+w")
         except Exception:
             pass
