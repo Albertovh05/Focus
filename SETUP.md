@@ -17,6 +17,7 @@ If you have `dist/Focus.exe` already:
 | Python      | 3.11 or newer |
 | pip         | included with Python |
 | Windows     | 10 or 11 (64-bit) |
+| Inno Setup  | 6.x, for installer builds |
 
 > **Important:** Use the standard Python installer from python.org. The Microsoft Store version of Python may cause issues with `pywin32`.
 
@@ -25,13 +26,22 @@ If you have `dist/Focus.exe` already:
 ```
 1. Open a terminal (cmd or PowerShell) in this project folder.
 2. Run:   build.bat
-3. When finished, find the executable at:   dist\Focus.exe
+3. When finished, find the outputs at:
+   - Portable executable:   dist\Focus.exe
+   - Installer:             dist\FocusSetup.exe
 ```
 
 The build script will:
 - Install all Python dependencies from `requirements.txt`
 - Generate the app icon (`focus_icon.ico`)
 - Run PyInstaller to produce a standalone single-file `.exe`
+- Run Inno Setup to produce `FocusSetup.exe`
+
+For a faster local build without the installer, run:
+
+```
+build.bat fast
+```
 
 ---
 
@@ -74,7 +84,8 @@ python main.py
 | `db.py`               | SQLite session storage |
 | `icon_gen.py`         | Generates `focus_icon.ico` |
 | `requirements.txt`    | Python dependencies |
-| `build.bat`           | Builds `dist/Focus.exe` |
+| `build.bat`           | Builds `dist/Focus.exe` and `dist/FocusSetup.exe` |
+| `installer.iss`       | Inno Setup installer definition |
 | `focus_history.db`    | Created on first run; stores session history |
 
 ---

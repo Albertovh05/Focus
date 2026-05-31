@@ -88,8 +88,10 @@ python main.py
 ```bash
 pip install -r requirements.txt
 build.bat
-# Output: dist/Focus.exe
+# Outputs: dist/Focus.exe and dist/FocusSetup.exe
 ```
+
+Installer builds require Inno Setup 6. For a faster developer build without the installer, run `build.bat fast`.
 
 ---
 
@@ -154,6 +156,7 @@ Focus/
 ├── icon_gen.py          # Generates focus_icon.ico at startup if missing
 ├── requirements.txt     # Python dependencies
 ├── build.bat            # One-command PyInstaller build
+├── installer.iss        # Inno Setup installer definition
 ├── Focus.spec           # PyInstaller spec (single-file exe, no console)
 └── SETUP.md             # Dev environment setup notes
 ```

@@ -1,6 +1,9 @@
 #ifndef AppVersion
   #define AppVersion "1.3.1"
 #endif
+#ifndef InstallerSource
+  #define InstallerSource "build\installer_src\Focus"
+#endif
 
 #define AppName      "Focus"
 #define AppPublisher "Albertovh05"
@@ -41,7 +44,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional icons:"; Flags: checkedonce
 
 [Files]
-Source: "dist\installer_src\Focus\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#InstallerSource}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\{#AppName}";          Filename: "{app}\{#AppExeName}"
