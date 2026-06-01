@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "1.3.1"
+  #define AppVersion "1.3.3"
 #endif
 #ifndef InstallerSource
   #define InstallerSource "build\installer_src\Focus"

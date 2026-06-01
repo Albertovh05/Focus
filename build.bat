@@ -5,7 +5,7 @@ pushd "%~dp0"
 :: --- Version ---------------------------------------------------------------
 :: Bump this before every release. Feeds into both PyInstaller and FocusSetup.exe.
 set "APP_NAME=Focus"
-set "APP_VERSION=1.3.1"
+set "APP_VERSION=1.3.3"
 set "DIST_DIR=dist"
 set "BUILD_DIR=build"
 set "SPEC_DIR=%BUILD_DIR%\pyinstaller_specs"

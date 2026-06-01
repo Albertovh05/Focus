@@ -152,7 +152,7 @@ Focus/
 ├── session_manager.py   # WinEvent hook and window enforcement
 ├── site_blocker.py      # Website blocking: hosts-file + Chromium tab watcher
 ├── overlay.py           # Always-on-top draggable timer overlay
-├── db.py                # SQLite: sessions + blocked domains
+├── db.py                # SQLite: sessions + blocked domains in %LOCALAPPDATA%\Focus
 ├── icon_gen.py          # Generates focus_icon.ico at startup if missing
 ├── requirements.txt     # Python dependencies
 ├── build.bat            # One-command PyInstaller build

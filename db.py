@@ -2,10 +2,21 @@
 import sqlite3, os, json
 from datetime import datetime
 
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "focus_history.db")
+
+def _db_path() -> str:
+    app_data = os.environ.get("LOCALAPPDATA")
+    if app_data:
+        return os.path.join(app_data, "Focus", "focus_history.db")
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "focus_history.db")
+
+
+DB_PATH = _db_path()
 
 
 def _conn():
+    db_dir = os.path.dirname(DB_PATH)
+    if db_dir:
+        os.makedirs(db_dir, exist_ok=True)
     c = sqlite3.connect(DB_PATH)
     c.row_factory = sqlite3.Row
     return c

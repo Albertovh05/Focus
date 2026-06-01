@@ -86,7 +86,7 @@ python main.py
 | `requirements.txt`    | Python dependencies |
 | `build.bat`           | Builds `dist/Focus.exe` and `dist/FocusSetup.exe` |
 | `installer.iss`       | Inno Setup installer definition |
-| `focus_history.db`    | Created on first run; stores session history |
+| `%LOCALAPPDATA%\Focus\focus_history.db` | Created on first run; stores session history and blocked domains |
 
 ---
 
