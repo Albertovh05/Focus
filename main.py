@@ -16,7 +16,8 @@ from PIL import Image
 import pystray
 
 from db import (save_session, get_sessions, fmt_duration,
-                get_blocked_domains, add_blocked_domain, remove_blocked_domain)
+                get_blocked_domains, add_blocked_domain, remove_blocked_domain,
+                get_domain_suggestions, add_domain_suggestion)
 from session_manager import SessionManager
 from overlay import OverlayWindow
 from site_blocker import SiteBlocker, _is_admin
@@ -610,6 +611,15 @@ class FocusApp:
                                      width=124, height=34)
         self._add_btn.pack(side="left", padx=(6, 0))
 
+        tk.Label(outer.body, text="Suggested websites", bg=C_SURFACE, fg=C_MUTED,
+                 font=FONTS["badge"]).pack(anchor="w", pady=(0, 5))
+
+        self._suggestions_frame = tk.Frame(outer.body, bg=C_MUTED_SURFACE)
+        self._suggestions_frame.pack(fill="x", pady=(0, 12))
+
+        tk.Label(outer.body, text="Blocked websites", bg=C_SURFACE, fg=C_MUTED,
+                 font=FONTS["badge"]).pack(anchor="w", pady=(0, 5))
+
         bl_outer = tk.Frame(outer.body, bg=C_SURFACE)
         bl_outer.pack(fill="x")
 
@@ -631,7 +641,42 @@ class FocusApp:
         bl_sb.pack(side="right", fill="y")
         self._bl_canvas.pack(side="left", fill="both", expand=True)
 
+        self._refresh_site_lists()
+
+    def _refresh_site_lists(self) -> None:
+        self._refresh_suggestions()
         self._refresh_blocklist()
+
+    def _refresh_suggestions(self) -> None:
+        for w in self._suggestions_frame.winfo_children():
+            w.destroy()
+
+        suggestions = get_domain_suggestions()
+        blocked = set(get_blocked_domains())
+        if not suggestions:
+            tk.Label(self._suggestions_frame, text="No suggestions yet",
+                     bg=C_MUTED_SURFACE, fg=C_DIM,
+                     font=FONTS["small"]).pack(anchor="w", padx=14, pady=10)
+            return
+
+        for domain in suggestions:
+            row = tk.Frame(self._suggestions_frame, bg=C_MUTED_SURFACE)
+            row.pack(fill="x", padx=10, pady=2)
+            tk.Label(row, text=domain, bg=C_MUTED_SURFACE, fg=C_TEXT,
+                     font=FONTS["body"]).pack(side="left", padx=(4, 8), pady=5)
+
+            is_blocked = domain in blocked
+            btn = tk.Button(row, text="Added" if is_blocked else "Add",
+                            command=lambda d=domain: self._add_suggested_domain(d),
+                            bg=C_MUTED_SURFACE, fg=C_DIM if is_blocked else C_ACCENT2,
+                            activebackground=C_BORDER, activeforeground=C_ACCENT2,
+                            disabledforeground=C_DIM,
+                            font=FONTS["small"],
+                            relief="flat", bd=0, padx=8, pady=2,
+                            cursor="" if is_blocked else "hand2")
+            if is_blocked:
+                btn.config(state="disabled")
+            btn.pack(side="right")
 
     def _refresh_blocklist(self) -> None:
         for w in self._blocklist_frame.winfo_children():
@@ -667,13 +712,22 @@ class FocusApp:
         domain = SiteBlocker._normalise(raw)
         if not domain:
             return
+        add_domain_suggestion(domain)
         add_blocked_domain(domain)
         self._domain_entry.delete(0, tk.END)
-        self._refresh_blocklist()
+        self._refresh_site_lists()
+
+    def _add_suggested_domain(self, domain: str) -> None:
+        domain = SiteBlocker._normalise(domain)
+        if not domain:
+            return
+        add_domain_suggestion(domain)
+        add_blocked_domain(domain)
+        self._refresh_site_lists()
 
     def _remove_blocked_domain(self, domain: str) -> None:
         remove_blocked_domain(domain)
-        self._refresh_blocklist()
+        self._refresh_site_lists()
 
     def _update_status_badges(self) -> None:
         allowed = sum(1 for var, _, _ in getattr(self, "_checkboxes", []) if var.get())
@@ -702,12 +756,13 @@ class FocusApp:
                     pass
         self._domain_entry.config(state=state)
         self._add_btn.config(state=state)
-        for row in self._blocklist_frame.winfo_children():
-            for widget in row.winfo_children():
-                try:
-                    widget.config(state=state)
-                except Exception:
-                    pass
+        for frame in (self._suggestions_frame, self._blocklist_frame):
+            for row in frame.winfo_children():
+                for widget in row.winfo_children():
+                    try:
+                        widget.config(state=state)
+                    except Exception:
+                        pass
         self._update_status_badges()
 
     # ── History tab ───────────────────────────────────────────────────────────
@@ -869,7 +924,7 @@ class FocusApp:
         if self._site_blocker:
             self._site_blocker.stop()
             self._site_blocker = None
-        self._refresh_blocklist()
+        self._refresh_site_lists()
 
         self._refresh_windows()
         if was_complete:
