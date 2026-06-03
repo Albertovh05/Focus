@@ -20,6 +20,9 @@ from datetime import datetime
 # ── WinEvent constants ──────────────────────────────────────────────────────
 EVENT_SYSTEM_FOREGROUND = 0x0003
 WINEVENT_OUTOFCONTEXT   = 0x0000
+VK_MENU                 = 0x12
+VK_LMENU                = 0xA4
+VK_RMENU                = 0xA5
 
 # Shell window classes that are always permitted so the system tray remains
 # accessible during a session. These are the taskbar containers only.
@@ -98,6 +101,18 @@ def _is_always_allowed_window(hwnd: int) -> bool:
     except Exception:
         pass
     return False
+
+
+def _is_window_switch_in_progress() -> bool:
+    """Return True while the user is holding Alt for an Alt-Tab transition."""
+    try:
+        user32 = ctypes.windll.user32
+        return any(
+            user32.GetAsyncKeyState(vk) & 0x8000
+            for vk in (VK_MENU, VK_LMENU, VK_RMENU)
+        )
+    except Exception:
+        return False
 
 
 class SessionManager:
@@ -239,6 +254,11 @@ class SessionManager:
             # (e.g. the phantom tk.Tk() root) a refocus target. Tray/taskbar
             # windows are allowed for clicks but must not become the target.
             self._remember_allowed_window(hwnd)
+        elif _is_window_switch_in_progress():
+            # Alt-Tab briefly foregrounds shell/switcher windows before the
+            # chosen destination receives focus. Let that transition finish;
+            # the poll loop will enforce again after Alt is released.
+            return
         else:
             # Give the OS a moment to finish its transition, then yank focus back.
             # Use _maybe_refocus to avoid stacking concurrent refocus threads.
@@ -256,6 +276,15 @@ class SessionManager:
         try:
             time.sleep(0.05)
             if not self.running:
+                return
+            if _is_window_switch_in_progress():
+                return
+            try:
+                fg = win32gui.GetForegroundWindow()
+            except Exception:
+                fg = 0
+            if fg and self._is_allowed(fg):
+                self._remember_allowed_window(fg)
                 return
             with self._lock:
                 target = self._last_allowed_hwnd
@@ -317,6 +346,8 @@ class SessionManager:
                 continue
             if self._is_allowed(fg):
                 self._remember_allowed_window(fg)
+            elif _is_window_switch_in_progress():
+                continue
             else:
                 self._maybe_refocus()
 
