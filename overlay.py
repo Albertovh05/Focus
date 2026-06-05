@@ -3,15 +3,31 @@ Always-on-top draggable timer overlay shown during a session.
 
 Click-through is on by default (Ctrl+Shift+M toggles drag mode).
 """
+import sys
 import ctypes
 import tkinter as tk
 from tkinter import font as tkfont
 
+_WINDOWS = sys.platform == 'win32'
+_DARWIN  = sys.platform == 'darwin'
 
+# Windows click-through constants
 _GWL_EXSTYLE       = -20
 _WS_EX_LAYERED     = 0x00080000
 _WS_EX_TRANSPARENT = 0x00000020
 _LWA_ALPHA         = 0x00000002
+
+# macOS pyobjc availability
+_HAS_PYOBJC_OVERLAY = False
+if _DARWIN:
+    try:
+        from AppKit import NSApp  # type: ignore[import]
+        _HAS_PYOBJC_OVERLAY = True
+    except ImportError:
+        pass
+
+# Platform UI font
+_UI_FONT = "SF Pro Display" if _DARWIN else "Segoe UI"
 
 
 class OverlayWindow:
@@ -44,9 +60,9 @@ class OverlayWindow:
         self._canvas = tk.Canvas(self.win, width=220, height=112, bg=self.BG,
                                  highlightthickness=0, bd=0)
         self._canvas.pack()
-        self._time_font = tkfont.Font(family=self._timer_family(), size=28, weight="bold")
-        self._label_font = tkfont.Font(family="Segoe UI", size=8, weight="bold")
-        self._small_font = tkfont.Font(family="Segoe UI", size=8)
+        self._time_font  = tkfont.Font(family=self._timer_family(), size=28, weight="bold")
+        self._label_font = tkfont.Font(family=_UI_FONT, size=8, weight="bold")
+        self._small_font = tkfont.Font(family=_UI_FONT, size=8)
 
         for widget in (self.win, self._canvas):
             widget.bind("<ButtonPress-1>", self._drag_start)
@@ -81,6 +97,13 @@ class OverlayWindow:
     # ── click-through ─────────────────────────────────────────────────────────
 
     def _apply_click_through(self) -> None:
+        if _WINDOWS:
+            self._apply_click_through_windows()
+        elif _DARWIN:
+            self._apply_click_through_mac()
+        self._draw()
+
+    def _apply_click_through_windows(self) -> None:
         try:
             hwnd = self.win.winfo_id()
             cur  = ctypes.windll.user32.GetWindowLongW(hwnd, _GWL_EXSTYLE)
@@ -89,16 +112,30 @@ class OverlayWindow:
             else:
                 new = (cur | _WS_EX_LAYERED) & ~_WS_EX_TRANSPARENT
             ctypes.windll.user32.SetWindowLongW(hwnd, _GWL_EXSTYLE, new)
-            # SetWindowLongW resets layered attributes — restore alpha explicitly
             ctypes.windll.user32.SetLayeredWindowAttributes(
                 hwnd, 0, int(self.ALPHA * 255), _LWA_ALPHA
             )
         except Exception:
             pass
-        self._draw()
+
+    def _apply_click_through_mac(self) -> None:
+        if not _HAS_PYOBJC_OVERLAY:
+            return
+        try:
+            for ns_win in NSApp.windows():
+                if ns_win.title() == "Overlay":
+                    ns_win.setIgnoresMouseEvents_(self._click_through)
+                    break
+        except Exception:
+            pass
 
     def _timer_family(self) -> str:
         families = set(tkfont.families())
+        if _DARWIN:
+            for f in ("SF Mono", "Menlo", "Monaco"):
+                if f in families:
+                    return f
+            return "Courier New"
         return "Cascadia Code" if "Cascadia Code" in families else "Consolas"
 
     def _round_rect(self, x1, y1, x2, y2, r, **kwargs):
@@ -119,9 +156,9 @@ class OverlayWindow:
         c = self._canvas
         c.delete("all")
         w, h = 220, 112
-        reached = bool(self._goal_seconds and self._elapsed >= self._goal_seconds)
-        border = self.FG_REACHED if reached else self.FG_ACCENT
-        time_color = self.FG_REACHED if reached else self.FG_TIME
+        reached     = bool(self._goal_seconds and self._elapsed >= self._goal_seconds)
+        border      = self.FG_REACHED if reached else self.FG_ACCENT
+        time_color  = self.FG_REACHED if reached else self.FG_TIME
 
         self._round_rect(3, 3, w - 3, h - 3, 18, fill=self.SURFACE, outline=border, width=1)
         self._round_rect(9, 9, w - 9, h - 9, 14, fill=self.SURFACE_2, outline=self.BORDER, width=1)
@@ -135,9 +172,10 @@ class OverlayWindow:
         else:
             label = ""
         if not self._click_through:
-            label = "DRAG MODE  Ctrl+Shift+M"
+            label      = "DRAG MODE  Ctrl+Shift+M"
             time_color = self.FG_MODE
-        c.create_text(w // 2, 96, text=label, fill=self.FG_LABEL if self._click_through else time_color,
+        c.create_text(w // 2, 96, text=label,
+                      fill=self.FG_LABEL if self._click_through else time_color,
                       font=self._small_font)
 
     # ── drag ─────────────────────────────────────────────────────────────────

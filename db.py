@@ -13,9 +13,14 @@ DEFAULT_DOMAIN_SUGGESTIONS = (
 
 
 def _db_path() -> str:
-    app_data = os.environ.get("LOCALAPPDATA")
-    if app_data:
-        return os.path.join(app_data, "Focus", "focus_history.db")
+    import sys
+    if sys.platform == 'win32':
+        app_data = os.environ.get("LOCALAPPDATA")
+        if app_data:
+            return os.path.join(app_data, "Focus", "focus_history.db")
+    elif sys.platform == 'darwin':
+        home = os.path.expanduser("~")
+        return os.path.join(home, "Library", "Application Support", "Focus", "focus_history.db")
     return os.path.join(os.path.dirname(os.path.abspath(__file__)), "focus_history.db")
 
 

@@ -1,56 +1,81 @@
 """
-Window enforcement logic.
-
-Hooks into foreground-window change events via a WinEvent hook and
-forces focus back to the last allowed window if the user switches
-to a disallowed one.
+Window enforcement logic — cross-platform (Windows + macOS).
 """
 import os
+import sys
 import threading
-import ctypes
-import ctypes.wintypes
-import win32gui
-import win32process
-import win32con
-import psutil
 import time
 from datetime import datetime
 
+import psutil
 
-# ── WinEvent constants ──────────────────────────────────────────────────────
-EVENT_SYSTEM_FOREGROUND = 0x0003
-WINEVENT_OUTOFCONTEXT   = 0x0000
-VK_MENU                 = 0x12
-VK_LMENU                = 0xA4
-VK_RMENU                = 0xA5
+_WINDOWS = sys.platform == 'win32'
+_DARWIN  = sys.platform == 'darwin'
 
-# Shell window classes that are always permitted so the system tray remains
-# accessible during a session. These are the taskbar containers only.
-_TRAY_CLASSES = frozenset({
-    "Shell_TrayWnd",             # main Windows taskbar
-    "Shell_SecondaryTrayWnd",    # taskbar on secondary monitors
-    "NotifyIconOverflowWindow",  # "^" notification overflow popup
-    "TopLevelWindowForOverflowXamlIsland",  # Windows 11 tray overflow host
-})
+# ── Windows-only imports ──────────────────────────────────────────────────────
+if _WINDOWS:
+    import ctypes
+    import ctypes.wintypes
+    import win32gui
+    import win32process
+    import win32con
 
-# Windows that are always allowed and hidden from the app selector.
-_ALWAYS_ALLOWED_CLASSES = frozenset({
-    "CabinetWClass",        # File Explorer
-    "ControlCenterWindow",  # Quick Settings panel (WiFi, Bluetooth, battery saver)
-})
-_ALWAYS_ALLOWED_PROCS   = frozenset({
-    "systemsettings.exe",       # Windows Settings app
-    "shellexperiencehost.exe",  # Windows shell experience host
-})
+    EVENT_SYSTEM_FOREGROUND = 0x0003
+    WINEVENT_OUTOFCONTEXT   = 0x0000
+    VK_MENU  = 0x12
+    VK_LMENU = 0xA4
+    VK_RMENU = 0xA5
 
+    _TRAY_CLASSES = frozenset({
+        "Shell_TrayWnd",
+        "Shell_SecondaryTrayWnd",
+        "NotifyIconOverflowWindow",
+        "TopLevelWindowForOverflowXamlIsland",
+    })
+    _ALWAYS_ALLOWED_CLASSES = frozenset({
+        "CabinetWClass",
+        "ControlCenterWindow",
+    })
+    _ALWAYS_ALLOWED_PROCS = frozenset({
+        "systemsettings.exe",
+        "shellexperiencehost.exe",
+    })
+
+# ── macOS-only imports ────────────────────────────────────────────────────────
+_HAS_PYOBJC = False
+if _DARWIN:
+    try:
+        from AppKit import (                          # type: ignore[import]
+            NSWorkspace, NSRunningApplication,
+            NSApplicationActivateIgnoringOtherApps,
+        )
+        from Quartz import (                          # type: ignore[import]
+            CGWindowListCopyWindowInfo,
+            kCGWindowListOptionOnScreenOnly,
+            kCGWindowListExcludeDesktopElements,
+            kCGNullWindowID,
+        )
+        _HAS_PYOBJC = True
+    except ImportError:
+        pass
+
+    _MAC_SKIP_OWNERS = frozenset({
+        'Dock', 'WindowServer', 'SystemUIServer', 'loginwindow',
+        'Control Center', 'NotificationCenter', 'Spotlight',
+    })
+    _MAC_SYSTEM_PROCS = frozenset({
+        'dock', 'systemuiserver', 'loginwindow', 'windowserver',
+        'controlcenter', 'notificationcenter', 'spotlight',
+        'finder',  # always allow Finder (equivalent to File Explorer)
+    })
+
+
+# ── Windows helper functions ──────────────────────────────────────────────────
 
 def _is_tray_window(hwnd: int) -> bool:
-    """Return True when hwnd belongs to the taskbar/tray window tree."""
-    if not hwnd:
+    if not _WINDOWS or not hwnd:
         return False
-
     candidates = [hwnd]
-
     try:
         for ancestor in (
             win32gui.GetAncestor(hwnd, win32con.GA_PARENT),
@@ -61,7 +86,6 @@ def _is_tray_window(hwnd: int) -> bool:
                 candidates.append(ancestor)
     except Exception:
         pass
-
     try:
         owner = win32gui.GetWindow(hwnd, win32con.GW_OWNER)
         while owner and owner not in candidates:
@@ -69,7 +93,6 @@ def _is_tray_window(hwnd: int) -> bool:
             owner = win32gui.GetWindow(owner, win32con.GW_OWNER)
     except Exception:
         pass
-
     try:
         parent = win32gui.GetParent(hwnd)
         while parent and parent not in candidates:
@@ -77,7 +100,6 @@ def _is_tray_window(hwnd: int) -> bool:
             parent = win32gui.GetParent(parent)
     except Exception:
         pass
-
     for candidate in candidates:
         try:
             if win32gui.GetClassName(candidate) in _TRAY_CLASSES:
@@ -88,7 +110,8 @@ def _is_tray_window(hwnd: int) -> bool:
 
 
 def _is_always_allowed_window(hwnd: int) -> bool:
-    """Return True for File Explorer and Windows Settings windows."""
+    if not _WINDOWS:
+        return False
     try:
         if win32gui.GetClassName(hwnd) in _ALWAYS_ALLOWED_CLASSES:
             return True
@@ -104,7 +127,8 @@ def _is_always_allowed_window(hwnd: int) -> bool:
 
 
 def _is_window_switch_in_progress() -> bool:
-    """Return True while the user is holding Alt for an Alt-Tab transition."""
+    if not _WINDOWS:
+        return False
     try:
         user32 = ctypes.windll.user32
         return any(
@@ -115,38 +139,52 @@ def _is_window_switch_in_progress() -> bool:
         return False
 
 
-class SessionManager:
+# ── Shared base ───────────────────────────────────────────────────────────────
+
+class _BaseSessionManager:
     def __init__(self, allowed_procs: set[str], own_pid: int,
                  overlay_hwnd: int = 0, on_tick=None):
-        """
-        allowed_procs: set of lowercased process names that are allowed
-                       (e.g. {"brave.exe", "chrome.exe"}). Any window belonging
-                       to one of these processes is permitted, so every tab and
-                       every window of an allowed app stays usable.
-        own_pid:       pid of the Focus app itself; its windows (main window and
-                       exit dialog) are always allowed so the session can be ended.
-        overlay_hwnd:  the timer overlay's window handle; never tracked as a
-                       refocus target since it is click-through and topmost.
-        on_tick:       callback(elapsed_seconds) called every second.
-        """
-        self.allowed_procs    = {p.lower() for p in allowed_procs}
-        self.own_pid          = own_pid
-        self.on_tick          = on_tick
-        self.running          = False
+        self.allowed_procs = {p.lower() for p in allowed_procs}
+        self.own_pid       = own_pid
+        self.on_tick       = on_tick
+        self.running       = False
         self.start_dt: datetime | None = None
         self.end_dt:   datetime | None = None
+        self._overlay_hwnd = overlay_hwnd
+        self._lock         = threading.Lock()
+        self._timer_thread: threading.Thread | None = None
 
-        self._overlay_hwnd       = overlay_hwnd
+    def stop(self):
+        self.end_dt  = datetime.now()
+        self.running = False
 
+    def _timer_loop(self):
+        while self.running:
+            time.sleep(1)
+            if self.running and self.on_tick and self.start_dt:
+                elapsed = int((datetime.now() - self.start_dt).total_seconds())
+                try:
+                    self.on_tick(elapsed)
+                except Exception:
+                    pass
+
+    @staticmethod
+    def get_open_windows() -> list[dict]:
+        raise NotImplementedError
+
+
+# ── Windows implementation ────────────────────────────────────────────────────
+
+class _WindowsSessionManager(_BaseSessionManager):
+    def __init__(self, allowed_procs: set[str], own_pid: int,
+                 overlay_hwnd: int = 0, on_tick=None):
+        super().__init__(allowed_procs, own_pid, overlay_hwnd, on_tick)
         self._last_allowed_hwnd: int = 0
-        self._hook               = None
-        self._hook_thread:   threading.Thread | None = None
-        self._timer_thread:  threading.Thread | None = None
-        self._poll_thread:   threading.Thread | None = None
-        self._lock = threading.Lock()
+        self._hook              = None
+        self._hook_thread:  threading.Thread | None = None
+        self._poll_thread:  threading.Thread | None = None
         self._refocus_active: bool = False
 
-        # WinEvent callback must be kept alive
         WinEventProc = ctypes.WINFUNCTYPE(
             None,
             ctypes.wintypes.HANDLE,
@@ -159,37 +197,21 @@ class SessionManager:
         )
         self._callback = WinEventProc(self._win_event_cb)
 
-    # ── public API ────────────────────────────────────────────────────────────
-
     def start(self):
         self.running  = True
         self.start_dt = datetime.now()
 
-        # The Focus app's own windows are always allowed (via own_pid), so the
-        # user can reach the app and exit dialog to end the session.
-
-        # Seed last_allowed_hwnd with the current foreground window if allowed
         hwnd = win32gui.GetForegroundWindow()
         self._remember_allowed_window(hwnd)
 
         self._hook_thread = threading.Thread(target=self._hook_loop, daemon=True)
         self._hook_thread.start()
-
         self._timer_thread = threading.Thread(target=self._timer_loop, daemon=True)
         self._timer_thread.start()
-
         self._poll_thread = threading.Thread(target=self._poll_loop, daemon=True)
         self._poll_thread.start()
 
-    def stop(self):
-        self.end_dt  = datetime.now()
-        self.running = False
-        # Unhook happens naturally when the message loop exits
-
-    # ── internal ──────────────────────────────────────────────────────────────
-
     def _proc_for(self, hwnd: int) -> tuple[int, str]:
-        """Resolve a window handle to (pid, lowercased process name)."""
         _, pid = win32process.GetWindowThreadProcessId(hwnd)
         return pid, psutil.Process(pid).name().lower()
 
@@ -203,7 +225,6 @@ class SessionManager:
         return self._is_allowed_app_window(hwnd)
 
     def _is_allowed_app_window(self, hwnd: int) -> bool:
-        """Return True for Focus windows or user-selected app windows."""
         if not hwnd or _is_tray_window(hwnd):
             return False
         try:
@@ -213,7 +234,6 @@ class SessionManager:
         return pid == self.own_pid or proc_name in self.allowed_procs
 
     def _remember_allowed_window(self, hwnd: int) -> None:
-        """Track only real app windows as refocus targets, never taskbar/tray."""
         if hwnd == self._overlay_hwnd:
             return
         if not win32gui.IsWindowVisible(hwnd):
@@ -224,7 +244,6 @@ class SessionManager:
             self._last_allowed_hwnd = hwnd
 
     def _find_allowed_hwnd(self) -> int:
-        """Find a visible allowed app window to use when the tracked target is stale."""
         found: list[int] = []
 
         def enum_cb(hwnd, _):
@@ -243,29 +262,18 @@ class SessionManager:
             return 0
         return found[0] if found else 0
 
-    def _win_event_cb(self, hWinEventHook, event, hwnd, idObject, idChild, dwEventThread, dwmsEventTime):
-        if not self.running:
+    def _win_event_cb(self, hWinEventHook, event, hwnd,
+                      idObject, idChild, dwEventThread, dwmsEventTime):
+        if not self.running or not hwnd:
             return
-        if not hwnd:
-            return
-
         if self._is_allowed(hwnd):
-            # Never make the click-through overlay or any hidden window
-            # (e.g. the phantom tk.Tk() root) a refocus target. Tray/taskbar
-            # windows are allowed for clicks but must not become the target.
             self._remember_allowed_window(hwnd)
         elif _is_window_switch_in_progress():
-            # Alt-Tab briefly foregrounds shell/switcher windows before the
-            # chosen destination receives focus. Let that transition finish;
-            # the poll loop will enforce again after Alt is released.
             return
         else:
-            # Give the OS a moment to finish its transition, then yank focus back.
-            # Use _maybe_refocus to avoid stacking concurrent refocus threads.
             self._maybe_refocus()
 
     def _maybe_refocus(self):
-        """Spawn a refocus thread only when one is not already running."""
         with self._lock:
             if self._refocus_active:
                 return
@@ -294,8 +302,6 @@ class SessionManager:
                 or not win32gui.IsWindowVisible(target)
                 or not self._is_allowed_app_window(target)
             ):
-                # Target became hidden (e.g. Focus window withdrawn to tray).
-                # Fall back to another visible allowed window if one exists.
                 target = self._find_allowed_hwnd()
                 with self._lock:
                     self._last_allowed_hwnd = target
@@ -312,28 +318,17 @@ class SessionManager:
             fg_hwnd    = win32gui.GetForegroundWindow()
             fg_tid, _  = win32process.GetWindowThreadProcessId(fg_hwnd)
             tgt_tid, _ = win32process.GetWindowThreadProcessId(target)
-
-            # Borrow foreground rights from the current foreground thread
             ctypes.windll.user32.AttachThreadInput(cur_tid, fg_tid, True)
             ctypes.windll.user32.AttachThreadInput(cur_tid, tgt_tid, True)
-
             win32gui.ShowWindow(target, win32con.SW_SHOW)
             win32gui.SetForegroundWindow(target)
             win32gui.BringWindowToTop(target)
-
             ctypes.windll.user32.AttachThreadInput(cur_tid, fg_tid, False)
             ctypes.windll.user32.AttachThreadInput(cur_tid, tgt_tid, False)
         except Exception:
             pass
 
     def _poll_loop(self):
-        """Backup enforcer: polls the foreground window every 250 ms.
-
-        Newly-launched apps can call SetForegroundWindow during their own
-        initialisation and steal focus back after our WinEvent-triggered
-        refocus has already run. This poll catches those cases that the
-        event hook misses or that occur between hook deliveries.
-        """
         while self.running:
             time.sleep(0.25)
             if not self.running:
@@ -352,7 +347,6 @@ class SessionManager:
                 self._maybe_refocus()
 
     def _hook_loop(self):
-        """Run a Windows message loop with the WinEvent hook."""
         user32 = ctypes.windll.user32
         hook = user32.SetWinEventHook(
             EVENT_SYSTEM_FOREGROUND,
@@ -364,7 +358,6 @@ class SessionManager:
             WINEVENT_OUTOFCONTEXT,
         )
         self._hook = hook
-
         msg = ctypes.wintypes.MSG()
         while self.running:
             bRet = user32.GetMessageW(ctypes.byref(msg), 0, 0, 0)
@@ -372,25 +365,11 @@ class SessionManager:
                 break
             user32.TranslateMessage(ctypes.byref(msg))
             user32.DispatchMessageW(ctypes.byref(msg))
-
         if hook:
             user32.UnhookWinEvent(hook)
 
-    def _timer_loop(self):
-        while self.running:
-            time.sleep(1)
-            if self.running and self.on_tick and self.start_dt:
-                elapsed = int((datetime.now() - self.start_dt).total_seconds())
-                try:
-                    self.on_tick(elapsed)
-                except Exception:
-                    pass
-
-    # ── utility ───────────────────────────────────────────────────────────────
-
     @staticmethod
     def get_open_windows() -> list[dict]:
-        """Return list of {hwnd, title, pid, process} for visible, titled windows."""
         results = []
 
         def enum_cb(hwnd, _):
@@ -399,8 +378,6 @@ class SessionManager:
             title = win32gui.GetWindowText(hwnd)
             if not title:
                 return
-            # Tray/taskbar, File Explorer, and Settings are always allowed and
-            # should not appear in the user-facing app selector.
             if _is_tray_window(hwnd) or _is_always_allowed_window(hwnd):
                 return
             try:
@@ -412,7 +389,6 @@ class SessionManager:
             results.append({"hwnd": hwnd, "title": title, "pid": pid, "process": name})
 
         win32gui.EnumWindows(enum_cb, None)
-        # Deduplicate by title (keep first occurrence)
         seen = set()
         unique = []
         for w in results:
@@ -421,3 +397,225 @@ class SessionManager:
                 seen.add(key)
                 unique.append(w)
         return sorted(unique, key=lambda x: x["title"].lower())
+
+
+# ── macOS implementation ──────────────────────────────────────────────────────
+
+class _MacSessionManager(_BaseSessionManager):
+    def __init__(self, allowed_procs: set[str], own_pid: int,
+                 overlay_hwnd: int = 0, on_tick=None):
+        super().__init__(allowed_procs, own_pid, overlay_hwnd, on_tick)
+        self._last_allowed_pid: int = 0
+        self._poll_thread:  threading.Thread | None = None
+        self._refocus_active: bool = False
+
+    def start(self):
+        self.running  = True
+        self.start_dt = datetime.now()
+
+        pid = self._get_foreground_pid()
+        if pid:
+            self._remember_allowed_pid(pid)
+
+        self._timer_thread = threading.Thread(target=self._timer_loop, daemon=True)
+        self._timer_thread.start()
+        self._poll_thread = threading.Thread(target=self._poll_loop, daemon=True)
+        self._poll_thread.start()
+
+    def _get_foreground_pid(self) -> int:
+        if not _HAS_PYOBJC:
+            return 0
+        try:
+            app = NSWorkspace.sharedWorkspace().frontmostApplication()
+            return app.processIdentifier() if app else 0
+        except Exception:
+            return 0
+
+    def _get_app_display_name(self, pid: int) -> str:
+        if not _HAS_PYOBJC:
+            try:
+                return psutil.Process(pid).name().lower()
+            except Exception:
+                return ''
+        try:
+            app = NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
+            if app:
+                return (app.localizedName() or '').lower()
+        except Exception:
+            pass
+        try:
+            return psutil.Process(pid).name().lower()
+        except Exception:
+            return ''
+
+    def _is_system_pid(self, pid: int) -> bool:
+        try:
+            name = psutil.Process(pid).name().lower()
+            if name in _MAC_SYSTEM_PROCS:
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _is_allowed_pid(self, pid: int) -> bool:
+        if not pid:
+            return False
+        if pid == self.own_pid:
+            return True
+        if self._is_system_pid(pid):
+            return True
+        display_name = self._get_app_display_name(pid)
+        return bool(display_name and display_name in self.allowed_procs)
+
+    def _remember_allowed_pid(self, pid: int) -> None:
+        if not pid or pid == self.own_pid:
+            return
+        if not self._is_allowed_pid(pid):
+            return
+        with self._lock:
+            self._last_allowed_pid = pid
+
+    def _find_allowed_pid(self) -> int:
+        if not _HAS_PYOBJC:
+            return 0
+        try:
+            for app in NSWorkspace.sharedWorkspace().runningApplications():
+                pid = app.processIdentifier()
+                if pid and self._is_allowed_pid(pid):
+                    return pid
+        except Exception:
+            pass
+        return 0
+
+    def _maybe_refocus(self):
+        with self._lock:
+            if self._refocus_active:
+                return
+            self._refocus_active = True
+        threading.Thread(target=self._refocus, daemon=True).start()
+
+    def _refocus(self):
+        try:
+            time.sleep(0.05)
+            if not self.running:
+                return
+            fg = self._get_foreground_pid()
+            if fg and self._is_allowed_pid(fg):
+                self._remember_allowed_pid(fg)
+                return
+            with self._lock:
+                target = self._last_allowed_pid
+            if not target or not self._is_pid_running(target):
+                target = self._find_allowed_pid()
+                with self._lock:
+                    self._last_allowed_pid = target
+                if not target:
+                    return
+            self._do_refocus(target)
+        finally:
+            with self._lock:
+                self._refocus_active = False
+
+    def _is_pid_running(self, pid: int) -> bool:
+        try:
+            return psutil.pid_exists(pid)
+        except Exception:
+            return False
+
+    def _do_refocus(self, target_pid: int) -> None:
+        if not _HAS_PYOBJC:
+            return
+        try:
+            app = NSRunningApplication.runningApplicationWithProcessIdentifier_(target_pid)
+            if app and not app.isTerminated():
+                app.activateWithOptions_(NSApplicationActivateIgnoringOtherApps)
+        except Exception:
+            pass
+
+    def _poll_loop(self):
+        while self.running:
+            time.sleep(0.25)
+            if not self.running:
+                break
+            pid = self._get_foreground_pid()
+            if not pid:
+                continue
+            if self._is_allowed_pid(pid):
+                self._remember_allowed_pid(pid)
+            else:
+                self._maybe_refocus()
+
+    @staticmethod
+    def get_open_windows() -> list[dict]:
+        if not _HAS_PYOBJC:
+            return _MacSessionManager._get_windows_psutil()
+
+        window_list = CGWindowListCopyWindowInfo(
+            kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
+            kCGNullWindowID,
+        )
+
+        seen: dict[int, dict] = {}  # pid -> entry
+
+        for win in window_list:
+            pid   = win.get('kCGWindowOwnerPID', 0)
+            owner = win.get('kCGWindowOwnerName') or ''
+            title = win.get('kCGWindowName') or ''
+            layer = win.get('kCGWindowLayer', 100)
+
+            if not pid or not owner:
+                continue
+            if owner in _MAC_SKIP_OWNERS:
+                continue
+            if layer not in (0, 3):  # normal + floating windows only
+                continue
+
+            if pid not in seen:
+                seen[pid] = {
+                    'hwnd': pid,
+                    'title': title or owner,
+                    'pid': pid,
+                    'process': owner,
+                }
+            elif title and not seen[pid]['title']:
+                seen[pid]['title'] = title
+
+        # Deduplicate by app display name (one entry per app)
+        by_name: dict[str, dict] = {}
+        for entry in seen.values():
+            key = entry['process'].lower()
+            if key not in by_name:
+                by_name[key] = entry
+
+        return sorted(by_name.values(), key=lambda x: x['title'].lower())
+
+    @staticmethod
+    def _get_windows_psutil() -> list[dict]:
+        """Fallback when pyobjc is unavailable: list processes with open windows via psutil."""
+        seen: dict[str, dict] = {}
+        for proc in psutil.process_iter(['pid', 'name', 'status']):
+            try:
+                if proc.info['status'] not in (psutil.STATUS_RUNNING, psutil.STATUS_SLEEPING):
+                    continue
+                name = proc.info['name'] or 'unknown'
+                key  = name.lower()
+                if key not in seen:
+                    seen[key] = {
+                        'hwnd': proc.info['pid'],
+                        'title': name,
+                        'pid': proc.info['pid'],
+                        'process': name,
+                    }
+            except Exception:
+                pass
+        return sorted(seen.values(), key=lambda x: x['title'].lower())
+
+
+# ── Public alias ──────────────────────────────────────────────────────────────
+
+if _WINDOWS:
+    SessionManager = _WindowsSessionManager
+elif _DARWIN:
+    SessionManager = _MacSessionManager
+else:
+    SessionManager = _MacSessionManager  # Linux fallback uses Mac implementation

@@ -15,6 +15,9 @@ import keyboard
 from PIL import Image
 import pystray
 
+_DARWIN = sys.platform == 'darwin'
+_UI_FONT = "SF Pro Display" if _DARWIN else "Segoe UI"
+
 from db import (save_session, get_sessions, fmt_duration,
                 get_blocked_domains, add_blocked_domain, remove_blocked_domain,
                 get_domain_suggestions, add_domain_suggestion)
@@ -46,13 +49,13 @@ THEME = {
         "danger_surface": "#2A1118",
     },
     "fonts": {
-        "title": ("Segoe UI", 26, "bold"),
-        "subtitle": ("Segoe UI", 11),
-        "section": ("Segoe UI", 14, "bold"),
-        "body": ("Segoe UI", 10),
-        "body_bold": ("Segoe UI", 10, "bold"),
-        "small": ("Segoe UI", 9),
-        "badge": ("Segoe UI", 8, "bold"),
+        "title": (_UI_FONT, 26, "bold"),
+        "subtitle": (_UI_FONT, 11),
+        "section": (_UI_FONT, 14, "bold"),
+        "body": (_UI_FONT, 10),
+        "body_bold": (_UI_FONT, 10, "bold"),
+        "small": (_UI_FONT, 9),
+        "badge": (_UI_FONT, 8, "bold"),
     },
     "spacing": {
         "page": 22,
@@ -225,7 +228,14 @@ class FocusApp:
         self.root.configure(bg=C_BG)
 
         try:
-            self.root.iconbitmap(resource_path("focus_icon.ico"))
+            if _DARWIN:
+                from PIL import ImageTk
+                _ico = Image.open(resource_path("focus_icon.png"))
+                _ico_photo = ImageTk.PhotoImage(_ico.resize((64, 64)))
+                self.root.iconphoto(True, _ico_photo)
+                self._icon_photo_ref = _ico_photo  # prevent GC
+            else:
+                self.root.iconbitmap(resource_path("focus_icon.ico"))
         except Exception:
             pass
 
@@ -330,7 +340,7 @@ class FocusApp:
 
         style.configure("TCheckbutton",
                         background=C_SURFACE, foreground=C_TEXT,
-                        font=("Segoe UI", 10))
+                        font=(_UI_FONT, 10))
         style.map("TCheckbutton",
                   background=[("active", C_SURFACE)],
                   indicatorcolor=[("selected", C_ACCENT2), ("!selected", C_BORDER)])
@@ -591,8 +601,9 @@ class FocusApp:
         header_row = tk.Frame(outer.body, bg=C_SURFACE)
         header_row.pack(fill="x", pady=(0, 8))
         if not _is_admin():
+            _admin_hint = "Run as root" if _DARWIN else "Run as Admin"
             tk.Label(header_row,
-                     text="Website Blocking: title watcher enabled. Run as Admin for hosts-file blocking.",
+                     text=f"Website Blocking: title watcher enabled. {_admin_hint} for hosts-file blocking.",
                      bg=C_SURFACE, fg=C_DIM, font=FONTS["small"]).pack(side="left")
         else:
             tk.Label(header_row, text="Website Blocking: hosts file and browser title watcher enabled.",
@@ -602,7 +613,7 @@ class FocusApp:
         input_row.pack(fill="x", pady=(0, 10))
 
         self._domain_entry = ttk.Entry(input_row, width=28,
-                                       font=("Segoe UI", 10))
+                                       font=(_UI_FONT, 10))
         self._domain_entry.pack(side="left")
         self._domain_entry.bind("<Return>", lambda e: self._add_blocked_domain())
 
@@ -696,11 +707,12 @@ class FocusApp:
             row.pack(fill="x", padx=10, pady=2)
             tk.Label(row, text=domain, bg=C_MUTED_SURFACE, fg=C_TEXT,
                      font=FONTS["body"]).pack(side="left", padx=(4, 8), pady=5)
+            _emoji_font = "Apple Color Emoji" if _DARWIN else "Segoe UI Emoji"
             tk.Button(row, text="🗑",
                       command=lambda d=domain: self._remove_blocked_domain(d),
                       bg=C_MUTED_SURFACE, fg=C_DANGER,
                       activebackground=C_BORDER, activeforeground=C_DANGER,
-                      font=("Segoe UI Emoji", 12),
+                      font=(_emoji_font, 12),
                       relief="flat", bd=0, padx=4, pady=2,
                       cursor="hand2").pack(side="right")
         self._update_status_badges()
@@ -943,7 +955,7 @@ class FocusApp:
         card = AuroraCard(dlg, "Session Complete", "You stayed locked in.")
         card.pack(fill="both", expand=True, padx=18, pady=18)
         tk.Label(card.body, text=f"{minutes} minutes focused",
-                 bg=C_SURFACE, fg=C_SUCCESS, font=("Segoe UI", 20, "bold")).pack(anchor="w", pady=(0, 10))
+                 bg=C_SURFACE, fg=C_SUCCESS, font=(_UI_FONT, 20, "bold")).pack(anchor="w", pady=(0, 10))
         tk.Label(card.body, text=f"{allowed_count} apps allowed",
                  bg=C_SURFACE, fg=C_TEXT, font=FONTS["body"]).pack(anchor="w", pady=2)
         tk.Label(card.body, text=f"{blocked_count} websites blocked",
@@ -1034,7 +1046,7 @@ class FocusApp:
 
         sentence_lbl = tk.Label(
             card.body, text=_MOTIVATIONAL[0], bg=C_SURFACE, fg=C_TEXT,
-            font=("Segoe UI", 12), justify="left", wraplength=460,
+            font=(_UI_FONT, 12), justify="left", wraplength=460,
         )
         sentence_lbl.pack(expand=True, fill="x", pady=8)
 
@@ -1076,9 +1088,14 @@ class FocusApp:
     # ── System tray ──────────────────────────────────────────────────────────
 
     def _start_tray(self):
-        try:
-            img = Image.open(resource_path("focus_icon.ico"))
-        except Exception:
+        img = None
+        for icon_name in ("focus_icon.png", "focus_icon.ico"):
+            try:
+                img = Image.open(resource_path(icon_name))
+                break
+            except Exception:
+                pass
+        if img is None:
             img = Image.new("RGBA", (64, 64), "#388bfd")
 
         menu = pystray.Menu(
@@ -1125,8 +1142,10 @@ class FocusApp:
 
 
 def main():
-    icon_path = resource_path("focus_icon.ico")
-    if not os.path.exists(icon_path):
+    # Ensure icon files exist before the UI starts
+    ico_missing = not os.path.exists(resource_path("focus_icon.ico"))
+    png_missing = not os.path.exists(resource_path("focus_icon.png"))
+    if ico_missing or png_missing:
         try:
             import icon_gen
             icon_gen.create_icon()
