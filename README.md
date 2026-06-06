@@ -6,7 +6,6 @@
 ![Platform](https://img.shields.io/badge/platform-Windows-informational?style=flat-square)
 ![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)
 
-<!-- Replace the line below with a real screenshot once the app is running -->
 ![Focus screenshot](docs/screenshot.png)
 
 ---
@@ -25,16 +24,14 @@ Focus treats the *entire desktop* as the boundary.
 
 ## At a Glance
 
-> Add short GIFs here. Suggested recordings (30–60 s each):
-
 | Feature | Demo |
 |---------|------|
-| Starting a session and picking allowed windows | *(add GIF)* |
-| Attempting to switch to a blocked app — getting yanked back | *(add GIF)* |
-| Overlay timer counting up, turning green when goal is reached | *(add GIF)* |
-| Adding blocked websites and having a tab auto-close | *(add GIF)* |
-| Motivational dialog when quitting prematurely | *(add GIF)* |
-| Session history tab showing total study time | *(add GIF)* |
+| Starting a session and picking allowed windows | ![Starting a focus session](docs/demo-start-session.gif) |
+| Attempting to switch to a blocked app — getting yanked back | ![Blocked app refocus demo](docs/demo-blocked-app.gif) |
+| Overlay timer counting up, turning green when goal is reached | ![Overlay goal reached demo](docs/demo-overlay-goal.gif) |
+| Adding blocked websites and having a tab auto-close | ![Website blocking demo](docs/demo-website-blocking.gif) |
+| Motivational dialog when quitting prematurely | ![Break dialog demo](docs/demo-break-dialog.gif) |
+| Session history tab showing total study time | ![Session history demo](docs/demo-history.gif) |
 
 ---
 
