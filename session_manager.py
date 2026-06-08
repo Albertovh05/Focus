@@ -143,16 +143,24 @@ def _is_window_switch_in_progress() -> bool:
 
 class _BaseSessionManager:
     def __init__(self, allowed_procs: set[str], own_pid: int,
-                 overlay_hwnd: int = 0, on_tick=None):
+                 overlay_hwnd: int = 0, on_tick=None, on_blocked_attempt=None):
         self.allowed_procs = {p.lower() for p in allowed_procs}
         self.own_pid       = own_pid
         self.on_tick       = on_tick
+        self.on_blocked_attempt = on_blocked_attempt
         self.running       = False
         self.start_dt: datetime | None = None
         self.end_dt:   datetime | None = None
         self._overlay_hwnd = overlay_hwnd
         self._lock         = threading.Lock()
         self._timer_thread: threading.Thread | None = None
+        self._emergency_until: float = 0.0
+
+    def start_emergency_pass(self, seconds: int) -> None:
+        self._emergency_until = max(self._emergency_until, time.monotonic() + seconds)
+
+    def emergency_pass_active(self) -> bool:
+        return time.monotonic() < self._emergency_until
 
     def stop(self):
         self.end_dt  = datetime.now()
@@ -177,13 +185,15 @@ class _BaseSessionManager:
 
 class _WindowsSessionManager(_BaseSessionManager):
     def __init__(self, allowed_procs: set[str], own_pid: int,
-                 overlay_hwnd: int = 0, on_tick=None):
-        super().__init__(allowed_procs, own_pid, overlay_hwnd, on_tick)
+                 overlay_hwnd: int = 0, on_tick=None, on_blocked_attempt=None):
+        super().__init__(allowed_procs, own_pid, overlay_hwnd, on_tick, on_blocked_attempt)
         self._last_allowed_hwnd: int = 0
         self._hook              = None
         self._hook_thread:  threading.Thread | None = None
         self._poll_thread:  threading.Thread | None = None
         self._refocus_active: bool = False
+        self._last_blocked_hwnd: int = 0
+        self._last_blocked_time: float = 0.0
 
         WinEventProc = ctypes.WINFUNCTYPE(
             None,
@@ -218,6 +228,8 @@ class _WindowsSessionManager(_BaseSessionManager):
     def _is_allowed(self, hwnd: int) -> bool:
         if not hwnd:
             return False
+        if self.emergency_pass_active():
+            return True
         if _is_tray_window(hwnd):
             return True
         if _is_always_allowed_window(hwnd):
@@ -271,7 +283,27 @@ class _WindowsSessionManager(_BaseSessionManager):
         elif _is_window_switch_in_progress():
             return
         else:
+            self._notify_blocked_attempt(hwnd)
             self._maybe_refocus()
+
+    def _notify_blocked_attempt(self, hwnd: int) -> None:
+        if not self.on_blocked_attempt:
+            return
+        now = time.monotonic()
+        with self._lock:
+            if hwnd == self._last_blocked_hwnd and now - self._last_blocked_time < 1.5:
+                return
+            self._last_blocked_hwnd = hwnd
+            self._last_blocked_time = now
+        try:
+            pid, proc_name = self._proc_for(hwnd)
+            title = win32gui.GetWindowText(hwnd)
+        except Exception:
+            pid, proc_name, title = 0, "unknown", ""
+        try:
+            self.on_blocked_attempt({"hwnd": hwnd, "pid": pid, "process": proc_name, "title": title})
+        except Exception:
+            pass
 
     def _maybe_refocus(self):
         with self._lock:
@@ -344,6 +376,7 @@ class _WindowsSessionManager(_BaseSessionManager):
             elif _is_window_switch_in_progress():
                 continue
             else:
+                self._notify_blocked_attempt(fg)
                 self._maybe_refocus()
 
     def _hook_loop(self):
@@ -403,11 +436,13 @@ class _WindowsSessionManager(_BaseSessionManager):
 
 class _MacSessionManager(_BaseSessionManager):
     def __init__(self, allowed_procs: set[str], own_pid: int,
-                 overlay_hwnd: int = 0, on_tick=None):
-        super().__init__(allowed_procs, own_pid, overlay_hwnd, on_tick)
+                 overlay_hwnd: int = 0, on_tick=None, on_blocked_attempt=None):
+        super().__init__(allowed_procs, own_pid, overlay_hwnd, on_tick, on_blocked_attempt)
         self._last_allowed_pid: int = 0
         self._poll_thread:  threading.Thread | None = None
         self._refocus_active: bool = False
+        self._last_blocked_pid: int = 0
+        self._last_blocked_time: float = 0.0
 
     def start(self):
         self.running  = True
@@ -460,12 +495,32 @@ class _MacSessionManager(_BaseSessionManager):
     def _is_allowed_pid(self, pid: int) -> bool:
         if not pid:
             return False
+        if self.emergency_pass_active():
+            return True
         if pid == self.own_pid:
             return True
         if self._is_system_pid(pid):
             return True
         display_name = self._get_app_display_name(pid)
         return bool(display_name and display_name in self.allowed_procs)
+
+    def _notify_blocked_attempt(self, pid: int) -> None:
+        if not self.on_blocked_attempt:
+            return
+        now = time.monotonic()
+        with self._lock:
+            if pid == self._last_blocked_pid and now - self._last_blocked_time < 1.5:
+                return
+            self._last_blocked_pid = pid
+            self._last_blocked_time = now
+        try:
+            name = psutil.Process(pid).name()
+        except Exception:
+            name = "unknown"
+        try:
+            self.on_blocked_attempt({"pid": pid, "process": name, "title": name})
+        except Exception:
+            pass
 
     def _remember_allowed_pid(self, pid: int) -> None:
         if not pid or pid == self.own_pid:
@@ -543,6 +598,7 @@ class _MacSessionManager(_BaseSessionManager):
             if self._is_allowed_pid(pid):
                 self._remember_allowed_pid(pid)
             else:
+                self._notify_blocked_attempt(pid)
                 self._maybe_refocus()
 
     @staticmethod

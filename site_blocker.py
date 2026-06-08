@@ -169,12 +169,14 @@ def _is_chromium_foreground_windows() -> bool:
 # ── Main class ────────────────────────────────────────────────────────────────
 
 class SiteBlocker:
-    def __init__(self, domains: list[str]):
+    def __init__(self, domains: list[str], on_blocked_attempt=None):
         self._domains: list[str] = [self._normalise(d) for d in domains if d.strip()]
+        self._on_blocked_attempt = on_blocked_attempt
         self._running        = False
         self._hosts_written  = False
         self._hook_thread: threading.Thread | None = None
         self._last_close_time: float = 0.0
+        self._last_notify_time: float = 0.0
         self._close_lock = threading.Lock()
 
         if _WINDOWS:
@@ -233,9 +235,23 @@ class SiteBlocker:
                 return
             title = win32gui.GetWindowText(hwnd)
             if title and _domain_in_title(title, self._domains):
+                self._notify_blocked_attempt(title)
                 threading.Thread(
                     target=self._close_tab_windows, args=(hwnd,), daemon=True
                 ).start()
+        except Exception:
+            pass
+
+    def _notify_blocked_attempt(self, title: str) -> None:
+        if not self._on_blocked_attempt:
+            return
+        with self._close_lock:
+            now = time.monotonic()
+            if now - self._last_notify_time < 1.5:
+                return
+            self._last_notify_time = now
+        try:
+            self._on_blocked_attempt({"title": title})
         except Exception:
             pass
 
@@ -346,6 +362,7 @@ class SiteBlocker:
             try:
                 title = self._get_browser_tab_title_mac(browser)
                 if title and _domain_in_title(title, self._domains):
+                    self._notify_blocked_attempt(title)
                     threading.Thread(
                         target=self._close_tab_mac, args=(browser,), daemon=True
                     ).start()

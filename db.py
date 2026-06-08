@@ -55,6 +55,9 @@ def init_db():
                 allowed_windows TEXT NOT NULL
             )
         """)
+        _ensure_column(c, "sessions", "blocked_app_attempts", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(c, "sessions", "blocked_site_attempts", "INTEGER NOT NULL DEFAULT 0")
+        _ensure_column(c, "sessions", "emergency_pass_seconds", "INTEGER NOT NULL DEFAULT 0")
         c.execute("""
             CREATE TABLE IF NOT EXISTS blocked_domains (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -65,6 +68,17 @@ def init_db():
             CREATE TABLE IF NOT EXISTS domain_suggestions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 domain TEXT NOT NULL UNIQUE
+            )
+        """)
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS profiles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                duration_minutes INTEGER,
+                allowed_processes TEXT NOT NULL,
+                blocked_domains TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
             )
         """)
         c.executemany(
@@ -78,17 +92,38 @@ def init_db():
         c.commit()
 
 
-def save_session(start_dt: datetime, end_dt: datetime, allowed_windows: list[str]):
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, spec: str) -> None:
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    if column not in {row["name"] for row in rows}:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {spec}")
+
+
+def save_session(
+    start_dt: datetime,
+    end_dt: datetime,
+    allowed_windows: list[str],
+    blocked_app_attempts: int = 0,
+    blocked_site_attempts: int = 0,
+    emergency_pass_seconds: int = 0,
+):
     duration = int((end_dt - start_dt).total_seconds())
     with _conn() as c:
         c.execute(
-            "INSERT INTO sessions (date, start_time, end_time, duration_seconds, allowed_windows) VALUES (?,?,?,?,?)",
+            """
+            INSERT INTO sessions (
+                date, start_time, end_time, duration_seconds, allowed_windows,
+                blocked_app_attempts, blocked_site_attempts, emergency_pass_seconds
+            ) VALUES (?,?,?,?,?,?,?,?)
+            """,
             (
                 start_dt.strftime("%Y-%m-%d"),
                 start_dt.strftime("%H:%M:%S"),
                 end_dt.strftime("%H:%M:%S"),
                 duration,
                 json.dumps(allowed_windows),
+                int(blocked_app_attempts),
+                int(blocked_site_attempts),
+                int(emergency_pass_seconds),
             ),
         )
         c.commit()
@@ -135,6 +170,73 @@ def add_domain_suggestion(domain: str) -> None:
 def remove_blocked_domain(domain: str) -> None:
     with _conn() as c:
         c.execute("DELETE FROM blocked_domains WHERE domain = ?", (domain,))
+        c.commit()
+
+
+def get_profiles() -> list[dict]:
+    init_db()
+    with _conn() as c:
+        rows = c.execute("SELECT * FROM profiles ORDER BY name COLLATE NOCASE").fetchall()
+    profiles = []
+    for row in rows:
+        item = dict(row)
+        item["allowed_processes"] = json.loads(item["allowed_processes"])
+        item["blocked_domains"] = json.loads(item["blocked_domains"])
+        profiles.append(item)
+    return profiles
+
+
+def get_profile(name: str) -> dict | None:
+    init_db()
+    with _conn() as c:
+        row = c.execute("SELECT * FROM profiles WHERE name = ?", (name,)).fetchone()
+    if not row:
+        return None
+    item = dict(row)
+    item["allowed_processes"] = json.loads(item["allowed_processes"])
+    item["blocked_domains"] = json.loads(item["blocked_domains"])
+    return item
+
+
+def save_profile(
+    name: str,
+    duration_minutes: int | None,
+    allowed_processes: list[str],
+    blocked_domains: list[str],
+) -> None:
+    clean_name = name.strip()
+    if not clean_name:
+        raise ValueError("Profile name is required")
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    processes = sorted({p.lower() for p in allowed_processes if p.strip()})
+    domains = sorted({d.lower() for d in blocked_domains if d.strip()})
+    with _conn() as c:
+        c.execute(
+            """
+            INSERT INTO profiles (
+                name, duration_minutes, allowed_processes, blocked_domains, created_at, updated_at
+            ) VALUES (?,?,?,?,?,?)
+            ON CONFLICT(name) DO UPDATE SET
+                duration_minutes = excluded.duration_minutes,
+                allowed_processes = excluded.allowed_processes,
+                blocked_domains = excluded.blocked_domains,
+                updated_at = excluded.updated_at
+            """,
+            (
+                clean_name,
+                duration_minutes,
+                json.dumps(processes),
+                json.dumps(domains),
+                now,
+                now,
+            ),
+        )
+        c.commit()
+
+
+def delete_profile(name: str) -> None:
+    with _conn() as c:
+        c.execute("DELETE FROM profiles WHERE name = ?", (name.strip(),))
         c.commit()
 
 

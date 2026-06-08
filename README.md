@@ -41,6 +41,8 @@ Focus treats the *entire desktop* as the boundary.
 - **Window blocking** — hooks into the Windows foreground-change event and forces focus back to your last allowed window within 50 ms of any disallowed switch
 - **Backup poll enforcer** — a 250 ms poll loop catches apps that steal focus back during their own startup (Office, browsers) after the event-triggered refocus already ran
 - **Process-level allow list** — every window of an allowed app (every tab, every dialog) is permitted; you pick by process, not individual window titles
+- **Focus profiles** — save duration, allowed apps, and blocked websites as reusable named setups
+- **Capture current workspace** — turn the apps currently open on your desktop into a saved profile
 - **System tray** — the app hides to the tray so it never gets in your way; closing the window keeps the session running
 - **Auto-focus on session start** — Focus brings its own window to the foreground the moment a session starts so you're never left on a blocked window
 
@@ -57,8 +59,9 @@ Focus treats the *entire desktop* as the boundary.
 
 ### End-of-session
 - **Motivational exit dialog** — if you try to quit *before* your goal, Focus shows three motivational prompts with a countdown before the exit button unlocks; each requires 5 seconds of reflection
+- **Emergency pass** — one 2-minute pass per session can temporarily relax app and website blocking after you enter a reason
 - **Frictionless exit after goal** — once your goal is reached, `Ctrl+Shift+J`, the End Session button, and tray → Exit all quit immediately with no dialog
-- **Session history** — every session is saved to a local SQLite database; the History tab shows date, start/end times, duration, and allowed windows alongside a running total
+- **Session history** — every session is saved to a local SQLite database; the History tab shows date, start/end times, duration, allowed windows, blocked app/site attempts, emergency pass use, and a running total
 
 ---
 
@@ -123,8 +126,8 @@ Installer builds require Inno Setup 6. For a faster developer build without the 
 │  db.py         │
 │  SQLite:       │
 │  sessions +    │
-│  blocked_      │
-│  domains       │
+│  profiles +    │
+│  blocked sites │
 └────────────────┘
 ```
 
@@ -149,7 +152,7 @@ Focus/
 ├── session_manager.py   # WinEvent hook and window enforcement
 ├── site_blocker.py      # Website blocking: hosts-file + Chromium tab watcher
 ├── overlay.py           # Always-on-top draggable timer overlay
-├── db.py                # SQLite: sessions + blocked domains in %LOCALAPPDATA%\Focus
+├── db.py                # SQLite: sessions, profiles, blocked domains in %LOCALAPPDATA%\Focus
 ├── icon_gen.py          # Generates focus_icon.ico at startup if missing
 ├── requirements.txt     # Python dependencies
 ├── build.bat            # One-command PyInstaller build
@@ -172,7 +175,7 @@ Focus/
 | Pillow | 10+ | Tray icon image loading |
 | keyboard | 0.13.5+ | Global hotkeys and `Ctrl+W` tab closing |
 | PyInstaller | 6+ | Single-file `.exe` packaging |
-| SQLite | stdlib | Session history and blocked-domain list |
+| SQLite | stdlib | Session history, profiles, and blocked-domain list |
 
 ---
 

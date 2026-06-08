@@ -6,9 +6,10 @@ the overlay, session manager, and global hotkey.
 """
 import sys
 import os
+import time
 import threading
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, simpledialog
 from datetime import datetime
 
 import keyboard
@@ -20,7 +21,8 @@ _UI_FONT = "SF Pro Display" if _DARWIN else "Segoe UI"
 
 from db import (save_session, get_sessions, fmt_duration,
                 get_blocked_domains, add_blocked_domain, remove_blocked_domain,
-                get_domain_suggestions, add_domain_suggestion)
+                get_domain_suggestions, add_domain_suggestion,
+                get_profiles, get_profile, save_profile, delete_profile)
 from session_manager import SessionManager
 from overlay import OverlayWindow
 from site_blocker import SiteBlocker, _is_admin
@@ -93,6 +95,7 @@ C_ACCENT  = COLORS["accent_violet"]
 C_ACCENT2 = COLORS["accent_cyan"]
 C_BLUE    = COLORS["accent_blue"]
 C_SUCCESS = COLORS["success"]
+C_WARNING = COLORS["warning"]
 C_DANGER  = COLORS["danger"]
 C_DANGER_DARK = COLORS["danger_dark"]
 C_HEADER  = C_ELEVATED
@@ -110,6 +113,7 @@ _MOTIVATIONAL = [
 ]
 
 _DURATIONS = (10, 15, 20, 25, 30, 45, 60)
+_EMERGENCY_PASS_SECONDS = 120
 
 
 def _mix(c1: str, c2: str, t: float) -> str:
@@ -250,6 +254,15 @@ class FocusApp:
         self._goal_reached: bool = False
         self._tray: pystray.Icon | None = None
         self._site_blocker: SiteBlocker | None = None
+        self._blocked_app_attempts: int = 0
+        self._blocked_site_attempts: int = 0
+        self._emergency_pass_used: bool = False
+        self._emergency_pass_active: bool = False
+        self._emergency_pass_seconds: int = 0
+        self._emergency_pass_start_ts: float = 0.0
+        self._emergency_pass_end_ts: float = 0.0
+        self._emergency_pass_token: int = 0
+        self._profile_names: list[str] = []
 
         self._style_ttk()
         self._build_ui()
@@ -486,6 +499,8 @@ class FocusApp:
                                     bg=C_SURFACE, fg=C_SUCCESS, font=FONTS["body_bold"])
         self._status_lbl.pack(anchor="w")
 
+        self._build_profiles_section(f)
+
         duration_card = AuroraCard(
             f, "Session Length", "Choose the amount of time you want locked in."
         )
@@ -540,6 +555,12 @@ class FocusApp:
         self._stop_btn.config(state="disabled")
         self._stop_btn.pack(side="left", padx=(8, 0))
 
+        self._pass_btn = AuroraButton(btn_row, text="Emergency Pass",
+                                      command=self._request_emergency_pass,
+                                      kind="secondary", width=150)
+        self._pass_btn.config(state="disabled")
+        self._pass_btn.pack(side="left", padx=(8, 0))
+
         tk.Label(btn_row, text="Ctrl+Shift+J", bg=C_BG, fg=C_DIM,
                  font=FONTS["small"]).pack(side="left", padx=(12, 0))
 
@@ -547,6 +568,170 @@ class FocusApp:
 
         self._checkboxes: list[tuple[tk.BooleanVar, str, str]] = []
         self._refresh_windows()
+
+    def _build_profiles_section(self, parent: ttk.Frame) -> None:
+        card = AuroraCard(
+            parent, "Focus Profiles", "Save a complete setup or capture the apps open right now."
+        )
+        card.pack(fill="x", padx=20, pady=(0, 12))
+
+        top = tk.Frame(card.body, bg=C_SURFACE)
+        top.pack(fill="x", pady=(0, 8))
+        self._profile_var = tk.StringVar()
+        self._profile_combo = ttk.Combobox(
+            top, textvariable=self._profile_var, state="readonly", width=28
+        )
+        self._profile_combo.pack(side="left", fill="x", expand=True)
+
+        self._apply_profile_btn = AuroraButton(
+            top, text="Apply", command=self._apply_selected_profile,
+            kind="secondary", width=86, height=34
+        )
+        self._apply_profile_btn.pack(side="left", padx=(8, 0))
+
+        btn_row = tk.Frame(card.body, bg=C_SURFACE)
+        btn_row.pack(fill="x")
+        self._save_profile_btn = AuroraButton(
+            btn_row, text="Save Current", command=self._save_current_profile,
+            kind="secondary", width=124, height=34
+        )
+        self._save_profile_btn.pack(side="left")
+        self._capture_profile_btn = AuroraButton(
+            btn_row, text="Capture Workspace", command=self._capture_workspace_profile,
+            kind="secondary", width=156, height=34
+        )
+        self._capture_profile_btn.pack(side="left", padx=(8, 0))
+        self._delete_profile_btn = AuroraButton(
+            btn_row, text="Delete", command=self._delete_selected_profile,
+            kind="danger", width=86, height=34
+        )
+        self._delete_profile_btn.pack(side="left", padx=(8, 0))
+
+        self._profile_status_lbl = tk.Label(
+            card.body, text="", bg=C_SURFACE, fg=C_DIM, font=FONTS["small"]
+        )
+        self._profile_status_lbl.pack(anchor="w", pady=(8, 0))
+        self._refresh_profiles()
+
+    def _refresh_profiles(self, select_name: str | None = None) -> None:
+        profiles = get_profiles()
+        self._profile_names = [p["name"] for p in profiles]
+        self._profile_combo["values"] = self._profile_names
+        if select_name and select_name in self._profile_names:
+            self._profile_var.set(select_name)
+        elif self._profile_var.get() not in self._profile_names:
+            self._profile_var.set(self._profile_names[0] if self._profile_names else "")
+        if not self._profile_names:
+            self._profile_status_lbl.config(text="No profiles saved yet.")
+        elif not self._profile_status_lbl.cget("text"):
+            self._profile_status_lbl.config(text=f"{len(self._profile_names)} profile(s) saved.")
+
+    def _selected_processes(self) -> list[str]:
+        return sorted({proc.lower() for var, _, proc in self._checkboxes if var.get()})
+
+    def _prompt_profile_name(self, initial: str = "") -> str | None:
+        name = simpledialog.askstring(
+            "Profile Name",
+            "Name this focus profile:",
+            initialvalue=initial,
+            parent=self.root,
+        )
+        if name is None:
+            return None
+        name = name.strip()
+        if not name:
+            messagebox.showwarning("Profile Name Required", "Please enter a profile name.", parent=self.root)
+            return None
+        return name
+
+    def _save_current_profile(self) -> None:
+        name = self._profile_var.get().strip() or self._prompt_profile_name()
+        if not name:
+            return
+        processes = self._selected_processes()
+        if not processes:
+            messagebox.showwarning(
+                "No Apps Selected",
+                "Select at least one allowed app before saving a profile.",
+                parent=self.root,
+            )
+            return
+        save_profile(name, self._target_minutes, processes, get_blocked_domains())
+        self._profile_status_lbl.config(text=f"Saved profile: {name}")
+        self._refresh_profiles(name)
+
+    def _capture_workspace_profile(self) -> None:
+        name = self._prompt_profile_name(self._profile_var.get().strip())
+        if not name:
+            return
+        own_pid = os.getpid()
+        windows = SessionManager.get_open_windows()
+        processes = sorted({w["process"].lower() for w in windows if w.get("pid") != own_pid})
+        if not processes:
+            messagebox.showwarning(
+                "No Workspace Apps",
+                "Open the apps you want in this workspace, then capture again.",
+                parent=self.root,
+            )
+            return
+        save_profile(name, self._target_minutes, processes, get_blocked_domains())
+        self._profile_status_lbl.config(text=f"Captured {len(processes)} app(s) in {name}.")
+        self._refresh_profiles(name)
+        self._refresh_windows()
+        self._select_processes(processes)
+
+    def _apply_selected_profile(self) -> None:
+        name = self._profile_var.get().strip()
+        if not name:
+            return
+        profile = get_profile(name)
+        if not profile:
+            self._refresh_profiles()
+            return
+        duration = profile.get("duration_minutes")
+        if duration in _DURATIONS:
+            self._select_duration(duration)
+
+        target_domains = {SiteBlocker._normalise(d) for d in profile["blocked_domains"]}
+        current_domains = set(get_blocked_domains())
+        for domain in current_domains - target_domains:
+            remove_blocked_domain(domain)
+        for domain in target_domains - current_domains:
+            add_domain_suggestion(domain)
+            add_blocked_domain(domain)
+        self._refresh_site_lists()
+
+        missing = self._select_processes(profile["allowed_processes"])
+        if missing:
+            self._profile_status_lbl.config(
+                text=f"Applied {name}. Not open: {', '.join(missing[:3])}"
+                     f"{'...' if len(missing) > 3 else ''}"
+            )
+        else:
+            self._profile_status_lbl.config(text=f"Applied profile: {name}")
+        self._update_status_badges()
+
+    def _select_processes(self, processes: list[str]) -> list[str]:
+        wanted = {p.lower() for p in processes}
+        seen: set[str] = set()
+        for var, _, proc in self._checkboxes:
+            proc_name = proc.lower()
+            if proc_name in wanted:
+                var.set(True)
+                seen.add(proc_name)
+            else:
+                var.set(False)
+        return sorted(wanted - seen)
+
+    def _delete_selected_profile(self) -> None:
+        name = self._profile_var.get().strip()
+        if not name:
+            return
+        if not messagebox.askyesno("Delete Profile", f"Delete profile '{name}'?", parent=self.root):
+            return
+        delete_profile(name)
+        self._profile_status_lbl.config(text=f"Deleted profile: {name}")
+        self._refresh_profiles()
 
     def _refresh_windows(self):
         for w in self._win_list_frame.winfo_children():
@@ -758,6 +943,14 @@ class FocusApp:
         self._start_btn.config(state="disabled" if locked else "normal")
         self._stop_btn.config(state="normal" if locked else "disabled")
         self._refresh_btn.config(state=state)
+        self._profile_combo.config(state="disabled" if locked else "readonly")
+        for btn in (
+            self._apply_profile_btn,
+            self._save_profile_btn,
+            self._capture_profile_btn,
+            self._delete_profile_btn,
+        ):
+            btn.config(state=state)
         for btn in self._duration_btns.values():
             btn.config(state=state)
         for row in self._win_list_frame.winfo_children():
@@ -775,7 +968,42 @@ class FocusApp:
                         widget.config(state=state)
                     except Exception:
                         pass
+        self._update_emergency_button()
         self._update_status_badges()
+
+    def _update_emergency_button(self) -> None:
+        if not hasattr(self, "_pass_btn"):
+            return
+        if not self._session:
+            self._pass_btn.config(text="Emergency Pass", state="disabled")
+            return
+        if self._emergency_pass_active:
+            remaining = max(int(self._emergency_pass_end_ts - time.monotonic()), 0)
+            self._pass_btn.config(text=f"Pass {remaining // 60}:{remaining % 60:02d}", state="disabled")
+        elif self._emergency_pass_used:
+            self._pass_btn.config(text="Pass Used", state="disabled")
+        else:
+            self._pass_btn.config(text="Emergency Pass", state="normal")
+
+    def _active_status_text(self) -> str:
+        if not self._target_minutes:
+            return "Focus Mode Active"
+        pass_line = ""
+        if self._emergency_pass_active:
+            remaining = max(int(self._emergency_pass_end_ts - time.monotonic()), 0)
+            pass_line = f"\nEmergency pass active: {remaining // 60}:{remaining % 60:02d} left"
+        elif self._emergency_pass_used:
+            pass_line = "\nEmergency pass used"
+        return (
+            "Focus Mode Active\n"
+            "Only approved apps are allowed until the timer ends.\n"
+            f"{len(self._allowed_titles)} app(s) allowed  ·  "
+            f"{len(get_blocked_domains())} website(s) blocked  ·  "
+            f"{self._target_minutes} min goal\n"
+            f"Blocked: {self._blocked_app_attempts} app switch(es)  ·  "
+            f"{self._blocked_site_attempts} website attempt(s)"
+            f"{pass_line}"
+        )
 
     # ── History tab ───────────────────────────────────────────────────────────
 
@@ -784,20 +1012,26 @@ class FocusApp:
         card = AuroraCard(f, "Session History", "A running record of completed and ended sessions.")
         card.pack(fill="both", expand=True, padx=20, pady=18)
 
-        cols = ("date", "start", "end", "duration", "windows")
+        cols = ("date", "start", "end", "duration", "apps", "sites", "pass", "windows")
         self._tree = ttk.Treeview(card.body, columns=cols, show="headings", selectmode="browse")
 
         self._tree.heading("date",     text="Date")
         self._tree.heading("start",    text="Start")
         self._tree.heading("end",      text="End")
         self._tree.heading("duration", text="Duration")
+        self._tree.heading("apps",     text="App Blocks")
+        self._tree.heading("sites",    text="Site Blocks")
+        self._tree.heading("pass",     text="Pass")
         self._tree.heading("windows",  text="Allowed Windows")
 
         self._tree.column("date",     width=110, anchor="center")
         self._tree.column("start",    width=80,  anchor="center")
         self._tree.column("end",      width=80,  anchor="center")
         self._tree.column("duration", width=90,  anchor="center")
-        self._tree.column("windows",  width=400, anchor="w")
+        self._tree.column("apps",     width=82,  anchor="center")
+        self._tree.column("sites",    width=82,  anchor="center")
+        self._tree.column("pass",     width=70,  anchor="center")
+        self._tree.column("windows",  width=320, anchor="w")
 
         vsb = ttk.Scrollbar(card.body, orient="vertical",   command=self._tree.yview)
         hsb = ttk.Scrollbar(card.body, orient="horizontal", command=self._tree.xview)
@@ -829,6 +1063,10 @@ class FocusApp:
             self._tree.insert("", "end", values=(
                 s["date"], s["start_time"], s["end_time"],
                 fmt_duration(s["duration_seconds"]),
+                s.get("blocked_app_attempts", 0),
+                s.get("blocked_site_attempts", 0),
+                fmt_duration(s.get("emergency_pass_seconds", 0))
+                if s.get("emergency_pass_seconds", 0) else "",
                 ", ".join(s["allowed_windows"]),
             ))
             total_sec += s["duration_seconds"]
@@ -841,6 +1079,14 @@ class FocusApp:
         if self._session:
             return
         self._goal_reached = False
+        self._blocked_app_attempts = 0
+        self._blocked_site_attempts = 0
+        self._emergency_pass_used = False
+        self._emergency_pass_active = False
+        self._emergency_pass_seconds = 0
+        self._emergency_pass_start_ts = 0.0
+        self._emergency_pass_end_ts = 0.0
+        self._emergency_pass_token += 1
 
         if self._target_minutes is None:
             messagebox.showwarning(
@@ -865,13 +1111,11 @@ class FocusApp:
             own_pid=os.getpid(),
             overlay_hwnd=self._overlay.win.winfo_id(),
             on_tick=self._on_tick,
+            on_blocked_attempt=self._on_blocked_app_attempt,
         )
         self._session.start()
 
-        blocked = get_blocked_domains()
-        if blocked:
-            self._site_blocker = SiteBlocker(blocked)
-            self._site_blocker.start()
+        blocked = self._start_site_blocker()
 
         self._overlay.set_goal(self._target_minutes)
         self._overlay.show()
@@ -879,8 +1123,7 @@ class FocusApp:
 
         self._set_locked_mode(True)
         self._status_lbl.config(
-            text=f"Focus Mode Active\nOnly approved apps are allowed until the timer ends.\n"
-                 f"{len(self._allowed_titles)} app(s) allowed  ·  {len(blocked)} website(s) blocked  ·  {self._target_minutes} min goal",
+            text=self._active_status_text(),
             fg=C_ACCENT2,
             justify="left",
         )
@@ -895,6 +1138,10 @@ class FocusApp:
 
     def _tick_ui(self, elapsed: int):
         self._overlay.update_time(elapsed)
+        if self._session:
+            self._update_emergency_button()
+            if self._emergency_pass_active:
+                self._status_lbl.config(text=self._active_status_text())
         if not self._goal_reached and elapsed >= self._target_minutes * 60:
             self._goal_reached = True
             self._status_lbl.config(
@@ -909,6 +1156,72 @@ class FocusApp:
         else:
             self._show_motivational_dialog()
 
+    def _start_site_blocker(self) -> list[str]:
+        blocked = get_blocked_domains()
+        if blocked:
+            self._site_blocker = SiteBlocker(blocked, on_blocked_attempt=self._on_blocked_site_attempt)
+            self._site_blocker.start()
+        return blocked
+
+    def _on_blocked_app_attempt(self, _info: dict) -> None:
+        self.root.after(0, self._record_blocked_app_attempt)
+
+    def _on_blocked_site_attempt(self, _info: dict) -> None:
+        self.root.after(0, self._record_blocked_site_attempt)
+
+    def _record_blocked_app_attempt(self) -> None:
+        if not self._session or self._emergency_pass_active:
+            return
+        self._blocked_app_attempts += 1
+        self._status_lbl.config(text=self._active_status_text(), fg=C_ACCENT2, justify="left")
+
+    def _record_blocked_site_attempt(self) -> None:
+        if not self._session or self._emergency_pass_active:
+            return
+        self._blocked_site_attempts += 1
+        self._status_lbl.config(text=self._active_status_text(), fg=C_ACCENT2, justify="left")
+
+    def _request_emergency_pass(self) -> None:
+        if not self._session or self._emergency_pass_used or self._emergency_pass_active:
+            return
+        reason = simpledialog.askstring(
+            "Emergency Pass",
+            "Why do you need a 2-minute emergency pass?",
+            parent=self.root,
+        )
+        if reason is None:
+            return
+        if not reason.strip():
+            messagebox.showwarning("Reason Required", "Enter a reason to start the emergency pass.", parent=self.root)
+            return
+
+        self._emergency_pass_used = True
+        self._emergency_pass_active = True
+        self._emergency_pass_start_ts = time.monotonic()
+        self._emergency_pass_end_ts = time.monotonic() + _EMERGENCY_PASS_SECONDS
+        self._emergency_pass_token += 1
+        token = self._emergency_pass_token
+
+        self._session.start_emergency_pass(_EMERGENCY_PASS_SECONDS)
+        if self._site_blocker:
+            self._site_blocker.stop()
+            self._site_blocker = None
+
+        self._update_emergency_button()
+        self._status_lbl.config(text=self._active_status_text(), fg=C_WARNING, justify="left")
+        self.root.after(_EMERGENCY_PASS_SECONDS * 1000, lambda: self._finish_emergency_pass(token))
+
+    def _finish_emergency_pass(self, token: int) -> None:
+        if token != self._emergency_pass_token or not self._session:
+            return
+        self._emergency_pass_active = False
+        self._emergency_pass_seconds += _EMERGENCY_PASS_SECONDS
+        self._emergency_pass_start_ts = 0.0
+        if get_blocked_domains() and not self._site_blocker:
+            self._start_site_blocker()
+        self._update_emergency_button()
+        self._status_lbl.config(text=self._active_status_text(), fg=C_ACCENT2, justify="left")
+
     def _stop_session(self):
         if not self._session:
             return
@@ -919,8 +1232,22 @@ class FocusApp:
         target_minutes = self._target_minutes or 0
         allowed_count = len(self._allowed_titles)
         blocked_count = len(get_blocked_domains())
-        save_session(self._session_start, end_dt, self._allowed_titles)
+        if self._emergency_pass_active and self._emergency_pass_start_ts:
+            self._emergency_pass_seconds += max(
+                1,
+                min(_EMERGENCY_PASS_SECONDS, int(time.monotonic() - self._emergency_pass_start_ts)),
+            )
+        save_session(
+            self._session_start,
+            end_dt,
+            self._allowed_titles,
+            self._blocked_app_attempts,
+            self._blocked_site_attempts,
+            self._emergency_pass_seconds,
+        )
         self._session = None
+        self._emergency_pass_active = False
+        self._emergency_pass_start_ts = 0.0
 
         self._overlay.hide()
 
@@ -949,7 +1276,7 @@ class FocusApp:
         dlg.resizable(False, False)
         dlg.attributes("-topmost", True)
         dlg.transient(self.root)
-        w, h = 430, 260
+        w, h = 460, 310
         dlg.geometry(f"{w}x{h}+{(dlg.winfo_screenwidth()-w)//2}+{(dlg.winfo_screenheight()-h)//2}")
 
         card = AuroraCard(dlg, "Session Complete", "You stayed locked in.")
@@ -960,6 +1287,13 @@ class FocusApp:
                  bg=C_SURFACE, fg=C_TEXT, font=FONTS["body"]).pack(anchor="w", pady=2)
         tk.Label(card.body, text=f"{blocked_count} websites blocked",
                  bg=C_SURFACE, fg=C_TEXT, font=FONTS["body"]).pack(anchor="w", pady=2)
+        tk.Label(card.body, text=f"{self._blocked_app_attempts} blocked app switch(es)",
+                 bg=C_SURFACE, fg=C_TEXT, font=FONTS["body"]).pack(anchor="w", pady=2)
+        tk.Label(card.body, text=f"{self._blocked_site_attempts} blocked website attempt(s)",
+                 bg=C_SURFACE, fg=C_TEXT, font=FONTS["body"]).pack(anchor="w", pady=2)
+        if self._emergency_pass_seconds:
+            tk.Label(card.body, text=f"Emergency pass used: {fmt_duration(self._emergency_pass_seconds)}",
+                     bg=C_SURFACE, fg=C_WARNING, font=FONTS["body"]).pack(anchor="w", pady=2)
         tk.Label(card.body, text="Session history has been saved.",
                  bg=C_SURFACE, fg=C_DIM, font=FONTS["small"]).pack(anchor="w", pady=(10, 16))
         AuroraButton(card.body, text="Continue", command=dlg.destroy,
